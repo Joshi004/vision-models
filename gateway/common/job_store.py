@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     error TEXT,
     created_at TEXT NOT NULL,
     started_at TEXT,
-    finished_at TEXT
+    finished_at TEXT,
+    downloaded_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS uploads (
@@ -74,6 +75,11 @@ def init_db() -> None:
     config.ensure_directories()
     with _connect() as conn:
         conn.executescript(_SCHEMA)
+        # Databases created before `downloaded_at` existed: CREATE TABLE IF NOT
+        # EXISTS above leaves them as they were, so add the column here.
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+        if "downloaded_at" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN downloaded_at TEXT")
 
 
 # --- jobs --------------------------------------------------------------
@@ -180,6 +186,41 @@ def delete_job_row(job_id: str) -> None:
         conn.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
 
 
+# Request body stored on a job whose data has been scrubbed (see scrub_job).
+SCRUBBED_REQUEST_JSON = "{}"
+
+
+def is_scrubbed(row: sqlite3.Row) -> bool:
+    """True once scrub_job has removed this job's request body and output."""
+    return row["request_json"] == SCRUBBED_REQUEST_JSON
+
+
+def scrub_job(job_id: str, *, error: str | None = None, downloaded: bool = False) -> None:
+    """Reduce a job to a minimal record: pipeline, status, partition, Slurm id
+    and timestamps stay (so the jobs list and the typical-run-time estimates
+    keep working); the request body (prompt, settings, asset ids) and the
+    output path are removed. `error` replaces the stored error text (used to
+    shorten a failure's log tail); `downloaded` stamps downloaded_at."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET request_json = ?, output_path = NULL, "
+            "error = COALESCE(?, error), "
+            "downloaded_at = CASE WHEN ? THEN COALESCE(downloaded_at, ?) ELSE downloaded_at END "
+            "WHERE job_id = ?",
+            (SCRUBBED_REQUEST_JSON, error, 1 if downloaded else 0, _now(), job_id),
+        )
+
+
+def list_finished_unscrubbed() -> list[sqlite3.Row]:
+    """Finished (succeeded or failed) jobs that still hold their request body
+    and possibly files -- what retention.sweep re-checks."""
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT * FROM jobs WHERE finished_at IS NOT NULL AND request_json != ?",
+            (SCRUBBED_REQUEST_JSON,),
+        ).fetchall()
+
+
 def count_inflight_jobs() -> int:
     with _connect() as conn:
         row = conn.execute("SELECT COUNT(*) AS n FROM jobs WHERE status IN ('queued', 'running')").fetchone()
@@ -215,6 +256,22 @@ def asset_in_use(asset_id: str) -> bool:
             "SELECT 1 FROM jobs WHERE instr(request_json, ?) > 0 LIMIT 1", (asset_id,)
         ).fetchone()
         return row is not None
+
+
+def asset_in_flight(asset_id: str) -> bool:
+    """Like asset_in_use, but only counts jobs that are still queued or running
+    -- i.e. whose GPU job may still need to read this upload."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM jobs WHERE status IN ('queued', 'running') AND instr(request_json, ?) > 0 LIMIT 1",
+            (asset_id,),
+        ).fetchone()
+        return row is not None
+
+
+def list_uploads_before(cutoff_iso: str) -> list[sqlite3.Row]:
+    with _connect() as conn:
+        return conn.execute("SELECT * FROM uploads WHERE created_at < ?", (cutoff_iso,)).fetchall()
 
 
 def delete_upload_row(asset_id: str) -> None:

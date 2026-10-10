@@ -191,6 +191,8 @@ class JobStatusResponse(BaseModel):
             "rvc:batch-convert",
             "parakeet:transcribe",
             "breeze-tts:synthesize",
+            "qwen-image21:generate",
+            "qwen-image21:edit",
         ],
     )
     status: Literal["queued", "running", "succeeded", "failed"] = Field(
@@ -219,9 +221,22 @@ class JobStatusResponse(BaseModel):
         examples=[None],
     )
     finished_at: str | None = Field(None, description="ISO 8601 UTC timestamp when the job reached succeeded/failed.", examples=[None])
+    downloaded_at: str | None = Field(
+        None,
+        description=(
+            "ISO 8601 UTC timestamp when the result was downloaded in full and deleted from the server. "
+            "Only ever set when the server runs with `preserve_job_data` false (see GET /v1/health). "
+            "Once set, GET /v1/jobs/{job_id}/result returns 410."
+        ),
+        examples=[None],
+    )
     error: str | None = Field(
         None,
-        description="Populated only when status='failed': a human-readable reason, plus (when available) the tail of the pipeline's own log output.",
+        description=(
+            "Populated only when status='failed': a human-readable reason, plus (when available) the tail "
+            "of the pipeline's own log output -- or, when the server keeps no job data "
+            "(`preserve_job_data` false), just the reason and the last log line."
+        ),
         examples=[None],
     )
     result_ready: bool = Field(
@@ -294,6 +309,15 @@ class HealthResponse(BaseModel):
         ...,
         description="The Slurm partition a generation request falls back to when it omits `partition`, or names one that doesn't currently exist.",
         examples=["background"],
+    )
+    preserve_job_data: bool = Field(
+        ...,
+        description=(
+            "False (the default): this server keeps no logs or inputs, deletes a result right after it "
+            "has been downloaded once, and keeps only a minimal record of each job -- download results "
+            "as soon as they are ready. True: everything is kept until `job_retention_days` pass."
+        ),
+        examples=[False],
     )
     job_retention_days: float = Field(
         ...,

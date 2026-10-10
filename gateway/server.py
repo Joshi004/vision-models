@@ -3,7 +3,7 @@ model-serving backends on this node.
 
 Backend-agnostic pieces (job tracking, uploads, Slurm polling,
 partition selection) live in common/. Each backend (LTX-2.3, LTX-2.5,
-Wan-Animate v1, RVC, Parakeet and Breeze TTS 2 today; more may be added later) owns its
+Wan-Animate v1, RVC, Parakeet, Breeze TTS 2 and Qwen-Image-2.1 today; more may be added later) owns its
 own request schemas and Slurm dispatch logic under services/<name>/,
 mounted here under its own path prefix.
 
@@ -35,8 +35,9 @@ from fastapi import Body, FastAPI, File, HTTPException, Query, Request, UploadFi
 from fastapi import Path as PathParam
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
-from common import config, guide, job_store, openapi_docs, partition_status, poller, purge, storage
+from common import config, guide, job_store, openapi_docs, partition_status, poller, purge, retention, storage
 from common.schemas import (
     CancelResponse,
     GuideResponse,
@@ -49,6 +50,7 @@ from common.schemas import (
     PurgeResponse,
     UploadResponse,
 )
+from common.one_time_file_response import OneTimeFileResponse
 from common.slurm import cancel_slurm_job
 from services.breeze_tts import config as breeze_tts_config
 from services.breeze_tts.router import router as breeze_tts_router
@@ -58,6 +60,8 @@ from services.ltx25 import config as ltx25_config
 from services.ltx25.router import router as ltx25_router
 from services.parakeet import config as parakeet_config
 from services.parakeet.router import router as parakeet_router
+from services.qwen_image21 import config as qwen_image21_config
+from services.qwen_image21.router import router as qwen_image21_router
 from services.rvc import config as rvc_config
 from services.rvc.router import router as rvc_router
 from services.wan_animate import config as wan_animate_config
@@ -88,7 +92,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="GPU Cluster Model-Serving API",
-    version="0.7.0",
+    version="0.9.0",
     description=openapi_docs.APP_DESCRIPTION,
     openapi_tags=openapi_docs.TAGS_METADATA,
     lifespan=lifespan,
@@ -103,6 +107,7 @@ app.include_router(wan_animate_router, prefix="/v1/wan-animate")
 app.include_router(rvc_router, prefix="/v1/rvc")
 app.include_router(parakeet_router, prefix="/v1/parakeet")
 app.include_router(breeze_tts_router, prefix="/v1/breeze-tts")
+app.include_router(qwen_image21_router, prefix="/v1/qwen-image21")
 
 # Registered backends, for GET /v1/guide (common/guide.py) -- each entry is
 # a small, enumerable set of facts: display name, path prefix, and where
@@ -118,6 +123,7 @@ _BACKENDS: list[guide.BackendInfo] = [
     guide.BackendInfo(id="rvc", name="RVC voice conversion", prefix="/v1/rvc", guide_file="rvc/GUIDE.md"),
     guide.BackendInfo(id="parakeet", name="Parakeet transcription", prefix="/v1/parakeet", guide_file="parakeet/GUIDE.md"),
     guide.BackendInfo(id="breeze-tts", name="Breeze TTS 2 text-to-speech", prefix="/v1/breeze-tts", guide_file="breeze_tts/GUIDE.md"),
+    guide.BackendInfo(id="qwen-image21", name="Qwen-Image-2.1 image generation", prefix="/v1/qwen-image21", guide_file="qwen_image21/GUIDE.md"),
 ]
 
 
@@ -172,6 +178,7 @@ def health() -> HealthResponse:
     return HealthResponse(
         status="ok",
         default_partition=config.FALLBACK_PARTITION,
+        preserve_job_data=config.PRESERVE_JOB_DATA,
         job_retention_days=config.JOB_RETENTION_DAYS,
     )
 
@@ -229,6 +236,7 @@ _TYPICAL_FALLBACK_SECONDS: dict[str, float] = {
     "rvc": rvc_config.TYPICAL_RUN_SECONDS,
     "parakeet": parakeet_config.TYPICAL_RUN_SECONDS,
     "breeze-tts": breeze_tts_config.TYPICAL_RUN_SECONDS,
+    "qwen-image21": qwen_image21_config.TYPICAL_RUN_SECONDS,
 }
 
 # Same idea, but for live progress readers -- most backends have none
@@ -277,6 +285,7 @@ def _row_to_status(row: sqlite3.Row, typical_cache: dict[str, tuple[float | None
         created_at=row["created_at"],
         started_at=row["started_at"],
         finished_at=row["finished_at"],
+        downloaded_at=row["downloaded_at"],
         error=row["error"],
         result_ready=row["status"] == "succeeded" and bool(row["output_path"]),
         typical_run_seconds=typical_run_seconds,
@@ -332,18 +341,27 @@ def job_status(job_id: _JOB_ID_PARAM) -> JobStatusResponse:
     # content entry into the 200 response alongside the real ones above.
     response_class=Response,
 )
-def job_result(job_id: _JOB_ID_PARAM) -> FileResponse:
+def job_result(job_id: _JOB_ID_PARAM, request: Request) -> FileResponse:
     row = job_store.get_job(job_id)
     if row is None:
         raise HTTPException(404, "Unknown job_id.")
+    if row["downloaded_at"]:
+        raise HTTPException(410, "Result was already downloaded and has been deleted from the server.")
     if row["status"] != "succeeded" or not row["output_path"]:
         raise HTTPException(409, f"Job is not finished successfully yet (status: {row['status']}).")
     output_path = Path(row["output_path"])
     if not output_path.exists():
         raise HTTPException(410, "Result file is no longer available (it may have expired).")
-    return FileResponse(
+    # Without MODEL_API_PRESERVE_JOB_DATA, the result is deleted as soon as it has
+    # been sent in full (this is a one-time download). OneTimeFileResponse runs
+    # the deletion only if the client stayed connected until the last chunk, so
+    # an aborted download keeps the file. A Range request is a partial download
+    # (e.g. a video player seeking), so it never triggers the deletion.
+    delete_after_sending = not config.PRESERVE_JOB_DATA and "range" not in request.headers
+    return OneTimeFileResponse(
         output_path,
         filename=output_path.name,
+        background=BackgroundTask(retention.on_result_downloaded, job_id) if delete_after_sending else None,
         # The output file is provably immutable once this can return 200 --
         # job_store.mark_succeeded only ever writes output_path the first
         # time a job reaches "succeeded" -- so a long "immutable" cache
@@ -373,6 +391,7 @@ def cancel_job(job_id: _JOB_ID_PARAM) -> CancelResponse:
     if row["slurm_job_id"]:
         cancel_slurm_job(row["slurm_job_id"])
     job_store.mark_failed(job_id, "Cancelled by client request.")
+    retention.on_job_failed(job_id)
     return CancelResponse(cancelled=True)
 
 

@@ -2,7 +2,7 @@
 
 A model-serving gateway for a GPU cluster (Slurm). One FastAPI app accepts jobs, submits each as a Slurm job, and serves the results. Each model runs in its own isolated Python environment.
 
-Models: LTX-2.3 and LTX-2.5 (video), Wan-Animate v1 (character replace), RVC via Applio (voice conversion), Parakeet (transcription), Breeze TTS 2 (text to speech).
+Models: LTX-2.3 and LTX-2.5 (video), Wan-Animate v1 (character replace), RVC via Applio (voice conversion), Parakeet (transcription), Breeze TTS 2 (text to speech), Qwen-Image-2.1 (image generation and editing).
 
 ## Layout
 
@@ -30,7 +30,7 @@ git clone --recurse-submodules <repo-url> vision        # or: git submodule upda
 cd vision
 
 # Python environments (one per model, built from the frozen lock files)
-for e in gateway ltx23 ltx25 wan_animate rvc parakeet breeze_tts; do scripts/build_env.sh $e; done
+for e in gateway ltx23 ltx25 wan_animate rvc parakeet breeze_tts qwen_image21; do scripts/build_env.sh $e; done
 
 # Web UI
 (cd gateway/ui && npm ci && npm run build)
@@ -46,6 +46,7 @@ Weights go under `$VISION_DATA_DIR/weights/<id>/`:
 | rvc | `weights/rvc/voices/<name>/{model.pth,model.index}` | your own voice models; Applio's pretrained files stay inside `third_party/Applio` (see below) |
 | parakeet | `weights/parakeet/parakeet-tdt-0.6b-v3.nemo` | no download script; see `docs/models/parakeet/README.md` |
 | breeze_tts | `weights/breeze_tts/breeze-tts-2` | `docs/models/breeze_tts/README.md` (Hugging Face `BreezeBlue/Breeze-TTS-2`) |
+| qwen_image21 | `weights/qwen_image21/{base,turbo}` | `models/qwen_image21/download_weights.sh` (not gated, ~31 GB each) |
 
 Applio looks up its pretrained files relative to its own folder, so those (`rvc/models/**`, `assets/config.json`) live inside `third_party/Applio` as git-ignored files. The submodule is configured with `ignore = untracked` so they never show up in `git status`.
 
@@ -56,6 +57,8 @@ cp vision.env.example vision.env     # optional, edit
 set -a; source vision.env; set +a
 gateway/run.sh                       # starts the API in a tmux session on port 8012
 ```
+
+By default the gateway keeps no job data: no logs, uploaded inputs are deleted when their job ends, and a result can be downloaded once, after which it is deleted. Set `MODEL_API_PRESERVE_JOB_DATA=true` in `vision.env` to keep everything for `MODEL_API_RETENTION_DAYS` instead. `./purge_all_data.sh` deletes every job's logs, inputs and outputs on demand (`--dry-run` to preview; it refuses while jobs are running).
 
 The API docs are at `/docs`, the integration guide at `/v1/guide`, the web UI at `/ui/`.
 
@@ -68,6 +71,7 @@ The API docs are at `/docs`, the integration guide at `/v1/guide`, the web UI at
 | `third_party/Wan2.2` | Wan-Video/Wan2.2 | `1ea34ff` |
 | `third_party/Applio` | IAHispano/Applio | `c7665ac` |
 | `third_party/breeze-tts` | breezeblue-ai/breeze-tts | `58ec70c` |
+| diffusers (no submodule; pinned in `models/qwen_image21/env/requirements.lock.txt`) | huggingface/diffusers | `1d5d056` |
 
 To move a pin: `git -C third_party/<name> fetch && git -C third_party/<name> checkout <sha>`, rebuild that model's env if its dependencies changed, then commit the updated submodule pointer. LTX-2.3 and 2.5 are the same upstream repository at two different commits, on purpose.
 

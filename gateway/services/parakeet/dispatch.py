@@ -23,7 +23,7 @@ import subprocess
 from pathlib import Path
 
 from common import config as common_config
-from common import job_store, storage
+from common import job_store, retention, storage
 from common.slurm import resolve_partition
 from services.parakeet import config
 from services.parakeet.schemas import TranscribeRequest
@@ -107,7 +107,7 @@ def _submit_slurm_job(job_id: str, job_dir: Path, module_args: list[str], output
         f"--mem-per-gpu={config.MEM_PER_GPU}",
         f"--time={config.JOB_TIME_LIMIT}",
         f"--job-name={common_config.SLURM_JOB_NAME_PREFIX}parakeet-api-{job_id[:8]}",
-        f"--output={job_dir / 'slurm.log'}",
+        f"--output={retention.slurm_log_path(job_dir)}",
         f"--wrap={wrap_str}",
     ]
     result = subprocess.run(sbatch_cmd, capture_output=True, text=True)

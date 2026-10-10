@@ -36,8 +36,7 @@ best-effort no-op (not an error) if it already finished either way. `DELETE /v1/
 permanently deletes a job that **has** already finished, along with any uploaded input no other job
 still references; this cannot be undone, and a queued/running job must be cancelled first.
 
-**Retention:** finished jobs (and their output files) are deleted automatically
-{{job_retention_days}} day(s) after they finish. Uploaded assets are **not** auto-deleted --
-re-uploading the same file again produces a new, additional `asset_id` rather than deduplicating.
+{{retention_text}} Re-uploading the same file again produces a new, additional `asset_id` rather than
+deduplicating.
 
 **Concurrency:** {{max_inflight_line}}

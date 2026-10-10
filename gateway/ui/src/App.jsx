@@ -4,7 +4,7 @@ import Sidebar from './components/Sidebar.jsx';
 import JobsPanel from './components/JobsPanel.jsx';
 import JobHistory from './components/JobHistory.jsx';
 import { ToastProvider } from './components/ui/Toast.jsx';
-import { FilmIcon, LayersIcon, WaveIcon, RedoIcon, MusicIcon, SwapUserIcon, MicIcon, StackIcon, TranscriptIcon } from './components/icons.jsx';
+import { FilmIcon, LayersIcon, WaveIcon, RedoIcon, MusicIcon, SwapUserIcon, MicIcon, StackIcon, TranscriptIcon, ImageIcon } from './components/icons.jsx';
 import TextToVideoForm from './forms/TextToVideoForm.jsx';
 import Ltx25TextToVideoForm from './forms/Ltx25TextToVideoForm.jsx';
 import Ltx25InterpolateForm from './forms/Ltx25InterpolateForm.jsx';
@@ -17,6 +17,7 @@ import RvcConvertForm from './forms/RvcConvertForm.jsx';
 import RvcBatchForm from './forms/RvcBatchForm.jsx';
 import TranscribeForm from './forms/TranscribeForm.jsx';
 import BreezeTtsForm from './forms/BreezeTtsForm.jsx';
+import { QwenImageGenerateForm, QwenImageEditForm } from './forms/QwenImageForm.jsx';
 import { getHealth, getOpenApi } from './api.js';
 import { extractSchemas, SchemaContext } from './schema.js';
 import { usePersistedState } from './storage.js';
@@ -31,6 +32,7 @@ const GROUPS = [
   { id: 'rvc', label: 'Voice Conversion' },
   { id: 'parakeet', label: 'Transcription' },
   { id: 'breeze', label: 'Text to Speech' },
+  { id: 'qwen-image', label: 'Image Generation' },
 ];
 
 // One entry per generation recipe this API actually has today. `pipeline`
@@ -160,13 +162,50 @@ const RECIPES = [
     Component: BreezeTtsForm,
     pipeline: 'breeze-tts:synthesize',
   },
+  {
+    id: 'qwen-image-generate',
+    label: 'Text to image',
+    description: 'Generate an image from a prompt with Qwen-Image-2.1, including transparent (RGBA) images.',
+    group: 'qwen-image',
+    icon: ImageIcon,
+    Component: QwenImageGenerateForm,
+    pipeline: 'qwen-image21:generate',
+  },
+  {
+    id: 'qwen-image-edit',
+    label: 'Edit / compose',
+    description: 'Edit an image, or compose a new one from up to 10 reference images, with Qwen-Image-2.1.',
+    group: 'qwen-image',
+    icon: ImageIcon,
+    Component: QwenImageEditForm,
+    pipeline: 'qwen-image21:edit',
+  },
 ];
 
 // True if some recipe form above can actually resubmit this job's exact
 // pipeline -- the only jobs JobRow.jsx offers a Retry button for (see
 // canRetry prop threaded through JobsPanel.jsx/JobHistory.jsx below).
 function canRetry(job) {
-  return RECIPES.some((recipe) => recipe.pipeline === job.pipeline);
+  // A job whose data was deleted (the server keeps no job data by default, see
+  // GET /v1/health preserve_job_data) has an empty request -- nothing to prefill.
+  const hasRequest = Object.keys(job.request ?? {}).length > 0;
+  return hasRequest && RECIPES.some((recipe) => recipe.pipeline === job.pipeline);
+}
+
+// A copy of a stored request without any uploaded-file references
+// (`asset_id`, `*_asset_id`, `*_asset_ids`). Used by Retry when the server
+// deletes uploads as soon as their job ends: reusing those ids would only fail
+// with a 400, so the form asks for the files again instead.
+function withoutAssetIds(value) {
+  if (Array.isArray(value)) return value.map(withoutAssetIds);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => key !== 'asset_id' && !key.endsWith('_asset_id') && !key.endsWith('_asset_ids'))
+        .map(([key, item]) => [key, withoutAssetIds(item)]),
+    );
+  }
+  return value;
 }
 
 // Selects the full job-history view (components/JobHistory.jsx) instead of
@@ -287,7 +326,8 @@ export default function App() {
     const recipe = RECIPES.find((r) => r.pipeline === job.pipeline);
     if (!recipe) return;
     setActiveId(recipe.id);
-    setPrefill({ job, nonce: Date.now() });
+    const keepsData = health?.preserve_job_data !== false;
+    setPrefill({ job: keepsData ? job : { ...job, request: withoutAssetIds(job.request) }, nonce: Date.now() });
     mainRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
@@ -322,7 +362,7 @@ export default function App() {
             <main ref={mainRef} className="flex-1 overflow-y-auto">
               {showingHistory ? (
                 <div className="px-5 py-6 lg:px-10">
-                  <JobHistory jobRetentionDays={health?.job_retention_days} onRetry={handleRetry} canRetry={canRetry} />
+                  <JobHistory jobRetentionDays={health?.job_retention_days} preserveJobData={health?.preserve_job_data} onRetry={handleRetry} canRetry={canRetry} />
                 </div>
               ) : (
                 <div className="flex flex-col gap-6 px-5 py-6 lg:flex-row lg:gap-10 lg:px-10">

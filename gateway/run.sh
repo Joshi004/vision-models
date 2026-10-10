@@ -11,6 +11,10 @@
 #   MODEL_API_FALLBACK_PARTITION          (default "background")
 #   MODEL_API_MAX_INFLIGHT                (optional soft concurrency cap, global across backends)
 #   MODEL_API_RETENTION_DAYS              (finished job cleanup, default 7)
+#   MODEL_API_PRESERVE_JOB_DATA           (default false: keep no logs/inputs/outputs -- inputs are deleted when their job ends,
+#                                          a result is deleted right after its first complete download. true: keep everything
+#                                          until MODEL_API_RETENTION_DAYS, as before)
+#   MODEL_API_UNUSED_UPLOAD_TTL_MINUTES   (only when not preserving: delete never-used uploads after this long, default 60)
 #
 #   VISION_DATA_DIR                       (default <repo>/../vision-data: envs/, weights/, jobs/, jobs.db live here)
 #
@@ -28,6 +32,10 @@
 #   BREEZE_TTS_MODEL_DIR                              (default <data dir>/weights/breeze_tts/breeze-tts-2)
 #   BREEZE_TTS_MEM_PER_GPU, BREEZE_TTS_CPUS, BREEZE_TTS_JOB_TIME   (Breeze TTS 2 backend's own Slurm allocation shape)
 #   BREEZE_TTS_MAX_TEXT_CHARS                         (default 1000)
+#
+#   QWEN_IMAGE21_BASE_DIR, QWEN_IMAGE21_TURBO_DIR     (default <data dir>/weights/qwen_image21/{base,turbo})
+#   QWEN_IMAGE21_MEM_PER_GPU, QWEN_IMAGE21_CPUS, QWEN_IMAGE21_JOB_TIME   (Qwen-Image-2.1 backend's own Slurm allocation shape)
+#   QWEN_IMAGE21_MAX_PROMPT_CHARS                     (default 8000)
 set -euo pipefail
 
 API_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -50,6 +50,10 @@ TAGS_METADATA = [
         "description": "Convert an existing recording to sound like one of a curated set of pre-installed voices, keeping its original delivery intact.",
     },
     {
+        "name": "Image generation",
+        "description": "Generate or edit still images (text-to-image, editing, multi-reference composition, transparent output). Grouped under each backend's own path prefix.",
+    },
+    {
         "name": "Text to speech",
         "description": "Generate speech from text (English and Chinese) -- design a voice from a description, or clone/direct a reference voice.",
     },
@@ -113,6 +117,10 @@ GPU/cluster availability -- a healthy API can still take minutes to actually sta
 cluster is busy, or report a job as `queued` for a long time. See `GET /v1/partitions` for live
 GPU/queue numbers, and the main guide's "Jobs and timing" section for what to expect while a job is
 queued or running.
+
+`preserve_job_data` tells you how this server treats your data. `false` (the default): no logs or
+inputs are kept, uploaded inputs are deleted when their job ends, and each result can be downloaded
+**once**, after which it is deleted. `true`: everything is kept for `job_retention_days`.
 """
 
 # ---------------------------------------------------------------------------
@@ -124,10 +132,8 @@ Upload a single file (image, audio, or video) and get back an `asset_id` to
 reference from any generation request (on any backend) that needs it. One
 file per call.
 
-Limit: {guide.STATIC_FACTS['upload_mb']} MB. Uploaded files are **not** automatically deleted
-(unlike finished job outputs, which expire after {config.JOB_RETENTION_DAYS:g} days) --
-re-uploading the same file again produces a new, additional `asset_id` rather
-than deduplicating.
+Limit: {guide.STATIC_FACTS['upload_mb']} MB. {guide.STATIC_FACTS['upload_retention_text']} Re-uploading
+the same file again produces a new, additional `asset_id` rather than deduplicating.
 
 Image format note: images are decoded and forced to RGB (the first 3 channels of
 whatever `PIL.Image.open()` returns) -- plain grayscale or palette-mode images
@@ -211,8 +217,15 @@ transcript itself -- see `POST /v1/parakeet/transcribe`'s own description for it
 `application/zip` for a batch job that produces more than one output file.
 
 Returns 409 if the job hasn't succeeded yet (check `GET /v1/jobs/{job_id}` first) and 410 if the
-result previously existed but has since expired per the retention policy described in the API's
-top-level description.
+result previously existed but is gone: expired per the retention policy described in the API's
+top-level description, or -- when this server keeps no job data (`preserve_job_data` is false in
+`GET /v1/health`, the default) -- **already downloaded**.
+
+**One-time download when `preserve_job_data` is false:** the file is deleted from the server right
+after it has been sent in full, and the job's `downloaded_at` is set. An interrupted download
+leaves the file in place, so you can simply try again. A request with a `Range` header is treated
+as a partial download and does not delete anything. Download results as soon as they are ready,
+and keep your own copy.
 """
 
 CANCEL_JOB = """
@@ -366,9 +379,9 @@ JOB_RESULT_RESPONSES = {
         },
     },
     410: {
-        "description": "The result file existed but has since expired / been cleaned up.",
+        "description": "The result file existed but has since expired / been cleaned up, or (when the server keeps no job data) was already downloaded once.",
         "content": {
-            "application/json": {"example": {"detail": "Result file is no longer available (it may have expired)."}}
+            "application/json": {"example": {"detail": "Result was already downloaded and has been deleted from the server."}}
         },
     },
 }

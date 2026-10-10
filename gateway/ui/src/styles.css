@@ -54,3 +54,14 @@
     background: transparent;
   }
 }
+
+/* Grey checkerboard behind a result image, so transparent (RGBA) areas are
+   visible as such -- see components/ResultPreview.jsx. */
+@utility bg-checkerboard {
+  background-color: #2b2f38;
+  background-image:
+    linear-gradient(45deg, #3a3f4a 25%, transparent 25%, transparent 75%, #3a3f4a 75%),
+    linear-gradient(45deg, #3a3f4a 25%, transparent 25%, transparent 75%, #3a3f4a 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+}

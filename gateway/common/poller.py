@@ -29,7 +29,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from common import config, job_store
+from common import config, job_store, retention
 
 logger = logging.getLogger("model-api.poller")
 
@@ -98,11 +98,13 @@ def _check_one(row: sqlite3.Row) -> None:
     expected_output = _expected_output_path(job_dir)
     if expected_output is not None and expected_output.exists():
         job_store.mark_succeeded(job_id, expected_output)
+        retention.on_job_succeeded(job_id)
         _pending_since.pop(job_id, None)
         return
 
     if (job_dir / ".failed").exists():
         job_store.mark_failed(job_id, _read_error(job_dir))
+        retention.on_job_failed(job_id)
         _pending_since.pop(job_id, None)
         return
 
@@ -130,8 +132,9 @@ def _check_one(row: sqlite3.Row) -> None:
     _pending_since.pop(job_id, None)
     if state == "COMPLETED":
         job_store.mark_failed(job_id, "Slurm job completed but no output file ever appeared.")
-        return
-    job_store.mark_failed(job_id, f"Slurm job ended with state: {state}")
+    else:
+        job_store.mark_failed(job_id, f"Slurm job ended with state: {state}")
+    retention.on_job_failed(job_id)
 
 
 def _cleanup_old_jobs() -> None:
@@ -150,6 +153,10 @@ async def poll_forever() -> None:
             for row in job_store.list_inflight_jobs():
                 _check_one(row)
             iteration += 1
+            if iteration == 1 or iteration % _CLEANUP_EVERY_N_POLLS == 0:
+                # Re-apply the no-retention rules to anything already finished
+                # (no-op when MODEL_API_PRESERVE_JOB_DATA is true).
+                retention.sweep()
             if iteration % _CLEANUP_EVERY_N_POLLS == 0:
                 _cleanup_old_jobs()
         except Exception:

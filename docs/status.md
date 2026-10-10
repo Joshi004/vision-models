@@ -18,6 +18,10 @@ _A plain-language snapshot of where things stand. Last checked: 2026-09-29._
 
 ---
 
+## 0. Data retention (changed 2026-10-10)
+
+Default is now **no retention** (`MODEL_API_PRESERVE_JOB_DATA=false`, in `vision.env`): Slurm logs go to `/dev/null`; `run.log` exists only while a job runs; an upload is deleted when the job that used it ends (or after 60 minutes if unused); a result is deleted right after it has been downloaded once (`downloaded_at` set, later downloads get 410); failed and cancelled jobs lose their folder at once. Each job keeps a minimal record (status, pipeline, timings; `request` is `{}`). A result nobody downloads is still removed after `MODEL_API_RETENTION_DAYS` (7). `MODEL_API_PRESERVE_JOB_DATA=true` restores the old behavior. Logic: `gateway/common/retention.py`. `./purge_all_data.sh` wipes everything on demand. The web UI hides Retry for scrubbed jobs and asks for fresh uploads on Retry.
+
 ## 1. What "model-api" actually is
 
 Think of it as a **reception desk** that sits in front of the GPU cluster. Instead of every video-generating program having its own separate front door, there's now one door (`model-api/`), and each program (LTX-2.3, Wan-Animate v1, and later MAGI-2.2) has its own hallway behind that door.
@@ -74,6 +78,7 @@ Nothing here is instant — every request is a real GPU job, so it always takes 
 | **RVC** (voice conversion — one recording at a time, or several in one batch) | **Yes** — 3 endpoints, `/v1/rvc/convert`, `/v1/rvc/batch-convert`, and `/v1/rvc/voices` | 1 GPU per job, ~1 minute for a ~10s clip (scales with clip length, and for a batch, with file count — files are converted one at a time, not in parallel) |
 | **Parakeet** (speech transcription — word- and segment-level timestamps) | **Yes** — 1 endpoint, `/v1/parakeet/transcribe` | 1 GPU per job, ~65-120s end to end for anything from a 10s clip to a 35-min chunked recording (node assignment affects timing more than length, in a small sample) |
 | **Breeze TTS 2** (text-to-speech — voice design, clone, direction; English + Chinese) | **Yes** — 1 endpoint, `/v1/breeze-tts/synthesize` | 1 GPU per job, ~20s (warm node) to ~70s (cold node) for a short sentence; ~170s for a 1000-character passage (~92s of audio). Weights are research / non-commercial use only |
+| **Qwen-Image-2.1** (text-to-image, image editing and composition from up to 10 references, transparent output) | **Yes** — 2 endpoints, `/v1/qwen-image21/images/generate` and `/v1/qwen-image21/images/edit` | 1 GPU per job, ~1.5-3 minutes each (mostly loading ~31 GB of weights; generation itself is 10 s fast / 39 s quality for a 2048x2048 image). Weights are research / non-commercial use only |
 | **MAGI-2.2** (10-second video + audio) | **No** — not wired in at all | Would need a whole 8-GPU node per job, ~20-30 min each |
 | **Qwen3-VL** | **N/A** — its folder isn't in this workspace anymore | Was a separate always-on server (vLLM), unrelated to this API |
 
@@ -273,6 +278,23 @@ exactly (10.68s outputs from 10.704s inputs) in both runs, no pid-file race in e
   request instead of guessing from the pipeline name alone; confirmed directly with a real
   `/convert` job using `export_format: FLAC` (server returned `Content-Type: audio/flac`, matching
   what the fixed preview now expects).
+
+### Qwen-Image-2.1 — ✅ done (2 endpoints), tested on real GPUs and through the real API (2026-10-10)
+
+Alibaba Qwen's 7B image model, released 2026-09-20. Its own environment (`envs/qwen_image21`; diffusers installed from git because `QwenImage21Pipeline` was not in a release yet, plus `torchvision`, which the Qwen3-VL processor needs) and ~62 GB of weights (base + Turbo, not gated). Details and measurements: `docs/models/qwen_image21/README.md`.
+
+- `POST /v1/qwen-image21/images/generate` — text-to-image; `mode` `fast` (Turbo, 8 steps) or `quality` (base, 40 steps by default), `aspect_ratio` from seven native 2K sizes.
+- `POST /v1/qwen-image21/images/edit` — same fields plus 1-10 reference images (`reference_image_asset_ids`).
+- Transparent output is requested through prompt wording, no parameter. The runner saves ordinary results as RGB and real transparency as RGBA.
+- Web UI: an "Image Generation" group with a text-to-image and an edit form; results preview as an image on a checkerboard.
+
+**Tested:** four direct GPU smoke jobs (quality, fast, transparent, one-reference edit), then one generate job and one two-reference edit through the real API. The API runs: a fast 16:9 generate (2752x1536, succeeded) and a two-reference quality edit (teapot + dragon sticker on one table, 2528x1696, Slurm run time 3m56s, 66.1 GiB peak; its first attempt failed, see below). Generation took 10 s (fast) and 39 s (quality) for 2048x2048; the transparent prompt produced a real alpha channel (alpha 0 to 255, 56% of pixels not fully opaque), ordinary prompts came back opaque.
+
+**Worth knowing:**
+- **Reference images cost GPU memory, so more of them are shrunk.** One reference at full size peaks at 64.6 GiB; two at full size 73.2 GiB (and ran out of memory in the VAE decode before `expandable_segments` was set); ten at full size did not finish in 11 minutes and was cancelled. The runner now resizes references by count (2: ~1536x1536 area, 3-4: ~1024x1024, 5-10: ~768x768); measured peaks are 66.1, 65.1 and 68.4 GiB. The cost is less fine detail carried over from the references. This was found by a real failed API job, not up front.
+- **The same seed gives a different image in `fast` and `quality`** (different checkpoints).
+- **Non-commercial license** (Qwen Research License). The API does not enforce it.
+- Not wired in: the official prompt rewriter, mask/circle local-edit inputs, vLLM-Omni/SGLang, FP8. `TYPICAL_RUN_SECONDS` starts at 300 s and is replaced by the median of real runs.
 
 ### MAGI-2.2 — ❌ not started. Here's the honest list of what's needed:
 

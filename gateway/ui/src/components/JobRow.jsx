@@ -115,6 +115,9 @@ export default function JobRow({
             )}
           </div>
 
+          {job.downloaded_at && (
+            <p className="text-xs text-muted">Result was downloaded and deleted from the server.</p>
+          )}
           {job.result_ready && <ResultPreview jobId={job.job_id} pipeline={job.pipeline} request={job.request} />}
 
           {/* Every job's exact submitted request, for debugging a failed job

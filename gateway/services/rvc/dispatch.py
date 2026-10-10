@@ -48,7 +48,7 @@ import subprocess
 from pathlib import Path
 
 from common import config as common_config
-from common import job_store, storage
+from common import job_store, retention, storage
 from common.slurm import resolve_partition
 from services.rvc import config
 from services.rvc.schemas import BatchConvertRequest, BatchSource, ConvertRequest
@@ -237,7 +237,7 @@ def _submit_slurm_job(
         f"--mem-per-gpu={config.MEM_PER_GPU}",
         f"--time={time_limit}",
         f"--job-name={common_config.SLURM_JOB_NAME_PREFIX}{job_name}",
-        f"--output={job_dir / 'slurm.log'}",
+        f"--output={retention.slurm_log_path(job_dir)}",
         *(extra_sbatch_args or []),
         f"--wrap={wrap_str}",
     ]

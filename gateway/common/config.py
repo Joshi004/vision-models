@@ -58,6 +58,19 @@ API_HOST = os.environ.get("MODEL_API_HOST", "0.0.0.0")
 API_PORT = int(os.environ.get("MODEL_API_PORT", "8012"))
 POLL_INTERVAL_SECONDS = float(os.environ.get("MODEL_API_POLL_INTERVAL", "5"))
 JOB_RETENTION_DAYS = float(os.environ.get("MODEL_API_RETENTION_DAYS", "7"))
+
+# Whether to keep job data (logs, uploaded inputs, generated outputs, the
+# request body of each job) the way this service always used to. Default
+# false: nothing is kept longer than needed -- see common/retention.py for the
+# exact rules (inputs are deleted when their GPU job ends, a result is deleted
+# right after it has been downloaded once, logs are not kept). true restores
+# the old behavior exactly: everything stays until JOB_RETENTION_DAYS passes
+# or the job is purged.
+PRESERVE_JOB_DATA = os.environ.get("MODEL_API_PRESERVE_JOB_DATA", "false").strip().lower() in ("1", "true", "yes", "on")
+# With PRESERVE_JOB_DATA off: an upload that no queued/running job references
+# is deleted this many minutes after it was uploaded (covers a file uploaded
+# and then never used, or a job that was rejected).
+UNUSED_UPLOAD_TTL_MINUTES = float(os.environ.get("MODEL_API_UNUSED_UPLOAD_TTL_MINUTES", "60"))
 # Optional soft safety valve on concurrent Slurm jobs this service has in
 # flight at once, across every backend combined (job_store's inflight count
 # is global, not per-backend). Unset (default) = no cap.

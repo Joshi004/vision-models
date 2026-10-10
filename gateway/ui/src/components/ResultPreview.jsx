@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { fetchResultBlob } from '../api.js';
+import { fetchResultBlob, getHealth } from '../api.js';
 import { getCachedResult, putCachedResult } from '../resultCache.js';
 import ProgressBar from './ProgressBar.jsx';
 import TranscriptView from './TranscriptView.jsx';
@@ -14,6 +14,27 @@ import Button from './ui/Button.jsx';
 // `breeze-tts:synthesize` always produces .wav (see
 // services/breeze_tts/dispatch.py).
 const AUDIO_PIPELINES = new Set(['ltx:text-to-audio', 'rvc:convert', 'breeze-tts:synthesize']);
+
+// Qwen-Image-2.1 results are PNG images (RGB, or RGBA when transparent) --
+// rendered with an <img> on a checkerboard so transparency is visible.
+const IMAGE_PIPELINES = new Set(['qwen-image21:generate', 'qwen-image21:edit']);
+
+// Whether the server deletes a result once it has been downloaded (GET
+// /v1/health preserve_job_data false). Fetched once for the whole page; null
+// (unknown) if the health call fails.
+let keepsNoDataPromise = null;
+function serverKeepsNoData() {
+  if (!keepsNoDataPromise) {
+    keepsNoDataPromise = getHealth()
+      .then((health) => health.preserve_job_data === false)
+      .catch(() => false);
+  }
+  return keepsNoDataPromise;
+}
+
+function isImagePipeline(pipeline) {
+  return IMAGE_PIPELINES.has(pipeline);
+}
 
 function isAudioPipeline(pipeline) {
   return AUDIO_PIPELINES.has(pipeline);
@@ -43,6 +64,7 @@ function isTranscriptPipeline(pipeline) {
 function resultExtension(pipeline, request) {
   if (isZipPipeline(pipeline)) return 'zip';
   if (isTranscriptPipeline(pipeline)) return 'json';
+  if (isImagePipeline(pipeline)) return 'png';
   if (pipeline === 'rvc:convert') return (request?.export_format || 'wav').toLowerCase();
   if (isAudioPipeline(pipeline)) return 'wav';
   return 'mp4';
@@ -81,6 +103,10 @@ export default function ResultPreview({ jobId, pipeline, request }) {
   const [checkingCache, setCheckingCache] = useState(true);
 
   const isTranscript = isTranscriptPipeline(pipeline);
+  const [oneTimeDownload, setOneTimeDownload] = useState(false);
+  useEffect(() => {
+    serverKeepsNoData().then(setOneTimeDownload);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -134,6 +160,7 @@ export default function ResultPreview({ jobId, pipeline, request }) {
 
   const isZip = isZipPipeline(pipeline);
   const isAudio = isAudioPipeline(pipeline);
+  const isImage = isImagePipeline(pipeline);
   const filename = `${jobId}.${resultExtension(pipeline, request)}`;
 
   return (
@@ -143,11 +170,21 @@ export default function ResultPreview({ jobId, pipeline, request }) {
           {isZip ? 'Load result' : 'Load preview'}
         </Button>
       )}
+      {!url && !progress && !checkingCache && oneTimeDownload && (
+        <p className="text-xs text-muted">
+          One-time download: loading it deletes the result from the server; this browser keeps a local copy.
+        </p>
+      )}
       {progress && <ProgressBar sentBytes={progress.receivedBytes} totalBytes={progress.totalBytes} label="Downloading" />}
       {error && <p className="text-xs text-danger">{error}</p>}
       {url && !isZip && isTranscript && transcript && <TranscriptView transcript={transcript} />}
       {url && !isZip && !isTranscript && isAudio && <audio src={url} controls className="w-full max-w-md" />}
-      {url && !isZip && !isTranscript && !isAudio && <video src={url} controls className="w-full max-w-md rounded-md" />}
+      {url && !isZip && !isTranscript && isImage && (
+        <img src={url} alt="Generated result" className="w-full max-w-md rounded-md bg-checkerboard" />
+      )}
+      {url && !isZip && !isTranscript && !isAudio && !isImage && (
+        <video src={url} controls className="w-full max-w-md rounded-md" />
+      )}
       {url && (
         <a href={url} download={filename} className="text-xs text-accent-2 hover:underline">
           Download {filename}

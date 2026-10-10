@@ -4,6 +4,24 @@ Dates are when a change shipped on this codebase, not necessarily when you're re
 `api_version` field (`GET /v1/guide?format=json`) is this server's own current version; compare it
 against what you last integrated against.
 
+- **0.9.0** (2026-10-10): **Behavior change: by default this server now keeps no job data.** With
+  `MODEL_API_PRESERVE_JOB_DATA` false (the default; `GET /v1/health` reports it as `preserve_job_data`):
+  no logs are stored; an uploaded input is deleted as soon as its job ends (or 60 minutes after upload
+  if no job used it), so each request needs a fresh upload; and a result can be downloaded **once**
+  -- `GET /v1/jobs/{job_id}/result` deletes the file right after sending it in full, then returns 410
+  and the job's new `downloaded_at` field is set. An interrupted download keeps the file, and a
+  request with a `Range` header does not count. A job whose data was deleted stays in the jobs list as
+  a minimal record (`request` is `{}`; a failed job keeps a one-line `error`). Set
+  `MODEL_API_PRESERVE_JOB_DATA=true` for the previous behavior (everything kept for
+  `job_retention_days`). Added `preserve_job_data` to `GET /v1/health` and `downloaded_at` to job
+  status; no endpoint was removed.
+- **0.8.0** (2026-10-10): Added a seventh backend, Qwen-Image-2.1 image generation:
+  `POST /v1/qwen-image21/images/generate` (text-to-image) and `POST /v1/qwen-image21/images/edit`
+  (editing and composition from 1-10 reference images). `mode` is `fast` (Turbo, 8 steps) or `quality`
+  (base, 40 steps by default); `aspect_ratio` picks one of seven native 2K sizes; transparent (RGBA) output
+  is requested through prompt wording. Returns a PNG. Jobs it creates report their `pipeline` as
+  `qwen-image21:generate` or `qwen-image21:edit`. Declared the `Image generation` tag. Model weights are
+  under the Qwen Research License (non-commercial use only). No change to any existing endpoint.
 - **0.7.0** (2026-10-10): Added a sixth backend, Breeze TTS 2 text-to-speech
   (`POST /v1/breeze-tts/synthesize`). One endpoint covers Voice Design (`text` + `instruction`),
   Voice Clone (`text` + `reference_audio_asset_id` + `reference_text`) and Voice Direction (clone

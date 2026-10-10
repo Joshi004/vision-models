@@ -44,10 +44,12 @@ class PurgeRetryableError(PurgeError):
     than silently losing track of a half-deleted job."""
 
 
-def _asset_ids(value: Any) -> set[str]:
-    """Every `asset_id`/`*_asset_id` string value nested anywhere in a job's
-    stored request body (e.g. ReplaceRequest.image_asset_id, or one entry of
-    TextToVideoRequest.images[].asset_id). Walks dicts/lists generically so
+def asset_ids_in(value: Any) -> set[str]:
+    """Every `asset_id`/`*_asset_id` string value, and every string in a
+    `*_asset_ids` list, nested anywhere in a job's stored request body (e.g.
+    ReplaceRequest.image_asset_id, one entry of
+    TextToVideoRequest.images[].asset_id, or Qwen's
+    reference_image_asset_ids). Walks dicts/lists generically so
     this needs no per-backend knowledge of any one request schema's shape --
     every backend's own asset-reference fields already follow this same
     `asset_id`/`..._asset_id` naming (see services/*/schemas.py)."""
@@ -56,11 +58,13 @@ def _asset_ids(value: Any) -> set[str]:
         for key, item in value.items():
             if (key == "asset_id" or key.endswith("_asset_id")) and isinstance(item, str):
                 found.add(item)
+            elif key.endswith("_asset_ids") and isinstance(item, list):
+                found |= {entry for entry in item if isinstance(entry, str)}
             else:
-                found |= _asset_ids(item)
+                found |= asset_ids_in(item)
     elif isinstance(value, list):
         for item in value:
-            found |= _asset_ids(item)
+            found |= asset_ids_in(item)
     return found
 
 
@@ -100,7 +104,7 @@ def purge_job(row: sqlite3.Row) -> tuple[list[str], list[str]]:
     request = json.loads(row["request_json"])
     removed: list[str] = []
     kept: list[str] = []
-    for asset_id in sorted(_asset_ids(request)):
+    for asset_id in sorted(asset_ids_in(request)):
         if job_store.asset_in_use(asset_id):
             kept.append(asset_id)
         else:
