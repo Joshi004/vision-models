@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="model-api">
+  <title>model-api</title>
+  <!-- Small feed-forward network: the mark for a model. -->
+  <rect width="32" height="32" rx="8" fill="#4F8CFF"/>
+  <g stroke="#F4F7FB" stroke-width="1.6" stroke-linecap="round">
+    <line x1="7.5" y1="11" x2="16" y2="8"/>
+    <line x1="7.5" y1="11" x2="16" y2="16"/>
+    <line x1="7.5" y1="11" x2="16" y2="24"/>
+    <line x1="7.5" y1="21" x2="16" y2="8"/>
+    <line x1="7.5" y1="21" x2="16" y2="16"/>
+    <line x1="7.5" y1="21" x2="16" y2="24"/>
+    <line x1="16" y1="8" x2="24.5" y2="11"/>
+    <line x1="16" y1="8" x2="24.5" y2="21"/>
+    <line x1="16" y1="16" x2="24.5" y2="11"/>
+    <line x1="16" y1="16" x2="24.5" y2="21"/>
+    <line x1="16" y1="24" x2="24.5" y2="11"/>
+    <line x1="16" y1="24" x2="24.5" y2="21"/>
+  </g>
+  <g fill="#F4F7FB">
+    <circle cx="7.5" cy="11" r="2.6"/>
+    <circle cx="7.5" cy="21" r="2.6"/>
+    <circle cx="16" cy="8" r="2.6"/>
+    <circle cx="16" cy="16" r="2.9"/>
+    <circle cx="16" cy="24" r="2.6"/>
+    <circle cx="24.5" cy="11" r="2.6"/>
+    <circle cx="24.5" cy="21" r="2.6"/>
+  </g>
+</svg>
