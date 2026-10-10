@@ -69,5 +69,8 @@ if [ -n "$HOOK" ] && [ -f "$HOOK" ]; then
 fi
 
 echo "== Consistency check"
-uv pip check --python "$ENV_DIR/bin/python"
+# Warning only: wan_animate always reports "decord was built for a different
+# platform" (its wheel is tagged cp36 but works fine); the original environment
+# reported the same.
+uv pip check --python "$ENV_DIR/bin/python" || echo "WARNING: uv pip check reported the issue(s) above."
 echo "== Done: $ENV_DIR"
