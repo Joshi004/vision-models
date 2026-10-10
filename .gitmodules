@@ -1,0 +1,20 @@
+[submodule "ltx-2.3"]
+	path = third_party/ltx-2.3
+	url = https://github.com/Lightricks/LTX-2.git
+	ignore = untracked
+[submodule "ltx-2.5"]
+	path = third_party/ltx-2.5
+	url = https://github.com/Lightricks/LTX-2.git
+	ignore = untracked
+[submodule "Wan2.2"]
+	path = third_party/Wan2.2
+	url = https://github.com/Wan-Video/Wan2.2.git
+	ignore = untracked
+[submodule "Applio"]
+	path = third_party/Applio
+	url = https://github.com/IAHispano/Applio.git
+	ignore = untracked
+[submodule "breeze-tts"]
+	path = third_party/breeze-tts
+	url = https://github.com/breezeblue-ai/breeze-tts.git
+	ignore = untracked
