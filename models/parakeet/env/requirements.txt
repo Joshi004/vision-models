@@ -1,0 +1,29 @@
+# PyTorch with CUDA 12.4 (compatible with CUDA driver 12.8)
+# Install with: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+torchaudio==2.6.0+cu124
+
+# CUDA Python bindings (must match driver's CUDA version)
+# Driver 570.x supports CUDA 12.8, so use cuda-python 12.8.x
+cuda-python==12.8.0
+numba-cuda<0.21.0
+
+nemo_toolkit[asr]>=1.22.0
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+pydantic>=2.5.0
+requests>=2.31.0
+librosa>=0.10.1
+soundfile>=0.12.1
+omegaconf>=2.3.0
+
+# Used by the on-demand Slurm job entrypoint (run_transcribe.py) to decode
+# arbitrary input formats (m4a/mp4/mov/...) to WAV before handing audio to
+# the model -- this deployment's libsndfile can't read those formats
+# directly, and no system ffmpeg exists on this cluster. Same approach as
+# ModelService_RVC-Applio/normalize_audio.py. Not needed by the legacy
+# always-on app.py, which only ever received already-decoded WAV/MP3/etc.
+imageio-ffmpeg>=0.5.1
+
