@@ -1,0 +1,59 @@
+# One .gitignore for the whole repository.
+#
+# Everything that is not code lives OUTSIDE the repo, in $VISION_DATA_DIR
+# (default: ../vision-data): Python environments, model weights, jobs, the job
+# database, outputs. So most of this file is a safety net for accidents, not a
+# list of things that normally appear here.
+#
+# Patterns are anchored where possible. Do not add broad type rules such as
+# *.txt, *.png or *.wav: they silently hide real files (this repo's
+# predecessor lost track of requirements.txt that way).
+
+# Secrets
+.env
+.env.*
+!.env.example
+vision.env
+secrets/
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Node / web UI build
+node_modules/
+/gateway/ui/dist/
+
+# Safety net: model weights and large binaries must never be committed.
+# Weights belong in $VISION_DATA_DIR/weights (see README).
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.nemo
+*.gguf
+*.whl
+
+# Safety net: runtime state that belongs in $VISION_DATA_DIR
+/gateway/jobs/
+/gateway/jobs.db*
+*.log
+*.pid
+nohup.out
+slurm-*.out
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
