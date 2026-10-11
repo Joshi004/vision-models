@@ -99,7 +99,7 @@ of requests.
 - `POST /v1/ltx25/videos/retake`'s source video must **already** have `8k+1` frames and width/height
   that are multiples of 32. A video produced by `POST /v1/ltx25/videos/generate` already satisfies
   this; an arbitrary video you upload from elsewhere might not. Uploads are {{upload_mb}} MB max
-  per file, and finished job outputs expire {{job_retention_days}} day(s) after they finish.
+  per file. {{upload_retention_text}}
 
 ### 6. Prompting guide
 

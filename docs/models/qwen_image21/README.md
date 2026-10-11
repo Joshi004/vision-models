@@ -57,6 +57,10 @@ $VISION_DATA_DIR/envs/qwen_image21/bin/python models/qwen_image21/runner/run_gen
 
 Everything runs with no CPU offload on one 80 GB GPU. The runner sets `PYTORCH_ALLOC_CONF=expandable_segments:True` and shrinks the reference images as their number grows (`default_condition_resolution` in `run_generate.py`), which is the one real quality trade-off: with several references, fine detail from them is preserved less well.
 
+## Data retention
+
+Results follow the gateway's retention setting (`MODEL_API_PRESERVE_JOB_DATA`, see the main README): by default an uploaded reference image is deleted when its job ends and the generated PNG is deleted right after it has been downloaded once.
+
 ## License
 
 **Qwen Research License Agreement: research and non-commercial use only.** Commercial use needs a separate agreement with Hangzhou Tongyi Laboratory. (The earlier Qwen-Image was Apache 2.0; 2.1 is not.) The code in this repository does not enforce this; whoever runs the deployment is responsible for how it is used.

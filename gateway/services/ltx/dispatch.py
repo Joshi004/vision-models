@@ -59,7 +59,8 @@ def _image_args(images: list) -> list[str]:
 
 # ---------------------------------------------------------------------------
 # Per-pipeline argv builders. Each returns the args *after* the interpreter
-# (i.e. starting with "-m"), with --output-path already set to `output_path`
+# (i.e. starting with "-m", or with the run_a2vid.py script path for
+# audio-to-video), with --output-path already set to `output_path`
 # (submit_job rewrites it to a partial path before actually submitting).
 # ---------------------------------------------------------------------------
 
@@ -124,7 +125,10 @@ def build_audio_to_video_args(req: AudioToVideoRequest, output_path: Path) -> li
     num_frames = video_shape.resolve_num_frames(req.duration_seconds, req.num_frames, req.frame_rate)
     audio_path = storage.resolve_asset_path(req.audio_asset_id)
     args = [
-        "-m", "ltx_pipelines.a2vid_two_stage",
+        str(config.RUN_A2VID_SCRIPT),
+        "--audio-path", str(audio_path),
+        "--work-dir", str(output_path.parent),
+        "--",
         "--checkpoint-path", str(config.DEV_CKPT),
         "--distilled-lora", str(config.DISTILLED_LORA), str(config.DISTILLED_LORA_STRENGTH),
         "--spatial-upsampler-path", str(config.UPSCALER),
@@ -136,7 +140,6 @@ def build_audio_to_video_args(req: AudioToVideoRequest, output_path: Path) -> li
         "--width", str(width),
         "--num-frames", str(num_frames),
         "--frame-rate", str(req.frame_rate),
-        "--audio-path", str(audio_path),
         "--audio-start-time", str(req.audio_start_time),
     ]
     if req.negative_prompt:

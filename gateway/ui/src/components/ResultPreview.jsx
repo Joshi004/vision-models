@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
-import { fetchResultBlob, getHealth } from '../api.js';
-import { getCachedResult, putCachedResult } from '../resultCache.js';
+import { useEffect, useRef, useState } from 'react';
+import { getHealth } from '../api.js';
+import { getUncachedResult, isLoadingResult, loadResult, onResultLoaded } from '../autoCache.js';
+import { getCachedResult } from '../resultCache.js';
 import ProgressBar from './ProgressBar.jsx';
 import TranscriptView from './TranscriptView.jsx';
 import Button from './ui/Button.jsx';
@@ -70,22 +71,24 @@ function resultExtension(pipeline, request) {
   return 'mp4';
 }
 
-// Loaded on demand (not automatically) and fetched as a blob rather than
-// used as a plain <video src="..."> -- a plain media element can't report
-// download progress or feed the local result cache below, so this goes
-// through api.js's fetch() wrapper instead and turns the response into an
-// object URL. Streamed with progress reporting (see api.js's
-// fetchResultBlob), since a result can be tens of MB and a bare spinner
-// would say very little about how much longer it'll take.
+// Fetched as a blob rather than used as a plain <video src="..."> -- a
+// plain media element can't report download progress or feed the local
+// result cache below, so this goes through api.js's fetch() wrapper
+// instead and turns the response into an object URL. Streamed with
+// progress reporting (see api.js's fetchResultBlob), since a result can be
+// tens of MB and a bare spinner would say very little about how much
+// longer it'll take.
 //
-// A result already fetched once is kept in resultCache.js's IndexedDB
-// store, keyed by jobId -- mounting this component re-checks that cache
-// first (below) and, on a hit, shows the video/audio immediately with no
-// network request at all. A fresh fetch (handleLoad) writes its blob back
-// into that same cache once it finishes, so the *next* time this mounts
-// for the same job (row re-expanded, Job History instead of the Jobs
-// panel, or even a page reload) it's instant too. Caching is best-effort
-// (see resultCache.js) -- this component works exactly as before if it's
+// A job submitted from this browser is downloaded automatically as soon as
+// it succeeds (see autoCache.js); any other job loads on demand, via the
+// "Load preview" button. Both go through autoCache.js's loadResult, which
+// writes the blob into resultCache.js's IndexedDB store, keyed by jobId --
+// mounting this component checks that cache first (below) and, on a hit,
+// shows the video/audio immediately with no network request at all. If a
+// download for this job is already in flight when this mounts, it joins
+// that download instead of starting another; if one finishes while this
+// is mounted, its result shows up here too. Caching is best-effort (see
+// resultCache.js) -- this component works exactly as before if it's
 // unavailable for any reason.
 //
 // For a transcript result (isTranscriptPipeline), the same blob is also
@@ -101,6 +104,10 @@ export default function ResultPreview({ jobId, pipeline, request }) {
   // the "Load preview" button doesn't flash on screen for an instant
   // before a cache hit replaces it with the video/audio itself.
   const [checkingCache, setCheckingCache] = useState(true);
+  // Set once a blob is shown, so the same result arriving twice (a "Load
+  // preview" click and the onResultLoaded notification for that same
+  // download) creates only one object URL.
+  const hasBlobRef = useRef(false);
 
   const isTranscript = isTranscriptPipeline(pipeline);
   const [oneTimeDownload, setOneTimeDownload] = useState(false);
@@ -121,6 +128,8 @@ export default function ResultPreview({ jobId, pipeline, request }) {
   // happen) surfaces as this component's own error state instead of
   // crashing -- the Download link still works either way.
   async function handleBlob(blob) {
+    if (hasBlobRef.current) return;
+    hasBlobRef.current = true;
     setUrl(URL.createObjectURL(blob));
     if (isTranscript) {
       try {
@@ -133,13 +142,19 @@ export default function ResultPreview({ jobId, pipeline, request }) {
 
   useEffect(() => {
     let active = true;
+    const unsubscribe = onResultLoaded((loadedJobId, blob) => {
+      if (active && loadedJobId === jobId) handleBlob(blob);
+    });
     getCachedResult(jobId).then((blob) => {
       if (!active) return;
-      if (blob) handleBlob(blob);
+      const found = blob ?? getUncachedResult(jobId);
+      if (found) handleBlob(found);
+      else if (isLoadingResult(jobId)) handleLoad();
       setCheckingCache(false);
     });
     return () => {
       active = false;
+      unsubscribe();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId]);
@@ -148,9 +163,8 @@ export default function ResultPreview({ jobId, pipeline, request }) {
     setError(null);
     setProgress({ receivedBytes: 0, totalBytes: 0 });
     try {
-      const blob = await fetchResultBlob(jobId, (receivedBytes, totalBytes) => setProgress({ receivedBytes, totalBytes }));
+      const blob = await loadResult(jobId, (receivedBytes, totalBytes) => setProgress({ receivedBytes, totalBytes }));
       await handleBlob(blob);
-      putCachedResult(jobId, blob); // best-effort; see resultCache.js
     } catch (err) {
       setError(err.message);
     } finally {

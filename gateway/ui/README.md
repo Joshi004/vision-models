@@ -57,6 +57,13 @@ the API's own `/ui` path.
   `src/components/JobRow.jsx` for one job's row, shared with the smaller
   `JobsPanel.jsx` strip shown under every form), with permanent delete via
   `DELETE /v1/jobs/{job_id}/purge`.
+- Data retention: the server keeps no job data by default (`preserve_job_data`
+  false in `GET /v1/health`), and the UI follows it. A result is a one-time
+  download -- `components/ResultPreview.jsx` says so before loading it, and the
+  browser's own copy (IndexedDB, see `resultCache.js`) is what remains. Retry
+  is hidden for a job whose data was deleted (its `request` is `{}`), and
+  clears reused upload ids from the pre-filled form, since uploads are deleted
+  when their job ends (see `src/App.jsx`'s `withoutAssetIds`).
 - `src/forms/` -- one form per generation recipe, each mapping 1:1 onto a
   request schema in `services/ltx/schemas.py`, `services/wan_animate/schemas.py`,
   `services/rvc/schemas.py`, or `services/parakeet/schemas.py`. The simplest

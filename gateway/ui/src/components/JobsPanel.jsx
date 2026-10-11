@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { cancelJob } from '../api.js';
+import { useAutoCacheResults } from '../autoCache.js';
 import { ACTIVE_STATUSES, useJobList } from '../utils.js';
 import { useToast } from './ui/Toast.jsx';
 import JobRow from './JobRow.jsx';
@@ -28,6 +29,7 @@ export default function JobsPanel({ refreshSignal, onRetry, canRetry }) {
   const [filter, setFilter] = useState('active');
   const { addToast } = useToast();
   const seenRef = useRef(null);
+  useAutoCacheResults(jobs);
 
   useEffect(() => {
     const seen = seenRef.current;

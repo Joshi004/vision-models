@@ -99,6 +99,8 @@ fi
 
 find "$JOBS_DIR" -mindepth 1 -maxdepth 1 ! -name _uploads -exec rm -rf -- {} +
 [ -d "$UPLOADS_DIR" ] && find "$UPLOADS_DIR" -mindepth 1 -exec rm -rf -- {} +
+# The gateway saves every upload into this folder; make sure it exists.
+mkdir -p "$UPLOADS_DIR"
 
 if [ -f "$DB" ]; then
   db_query "DELETE FROM jobs" >/dev/null

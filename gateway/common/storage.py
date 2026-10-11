@@ -17,6 +17,9 @@ def save_upload_bytes(filename: str, data: bytes) -> tuple[str, Path]:
     asset_id = uuid.uuid4().hex
     safe_name = Path(filename or "upload").name  # strip any directory components
     dest = config.UPLOADS_DIR / f"{asset_id}__{safe_name}"
+    # Created at startup too, but the folder can be removed while the server
+    # runs (e.g. by hand while clearing data); recreate it rather than fail.
+    config.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
     job_store.create_upload(asset_id, safe_name, dest, len(data))
     return asset_id, dest

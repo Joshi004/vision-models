@@ -41,6 +41,11 @@ UPSCALER = MODEL_DIR / "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
 
 RUN_PIPELINE_JOB_SCRIPT = common_config.MODEL_API_DIR / "common" / "run_pipeline_job.py"
 
+# Audio-to-video entrypoint, run with PIPELINE_PYTHON: converts the input
+# audio to stereo (the LTX-2.3 audio encoder rejects mono) and then runs
+# ltx_pipelines.a2vid_two_stage -- see that script's own header comment.
+RUN_A2VID_SCRIPT = LTX_PROJECT_ROOT / "runner" / "run_a2vid.py"
+
 # ---------------------------------------------------------------------------
 # Video/audio defaults (mirrors generate.sh)
 # ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { listJobs } from './api.js';
+import { rememberSubmittedJob } from './autoCache.js';
 
 // Statuses that mean "not finished yet" -- the only ones a job can still be
 // cancelled from, and the only ones useJobList's once-a-second elapsed-time
@@ -76,7 +77,9 @@ export function useJobList(limit, refreshSignal) {
 
 // Shared submit-a-job state machine used by every recipe form: tracks
 // in-flight/error/last-job_id state so each form only needs to build its
-// own payload and call submit(() => postJSON(path, payload)).
+// own payload and call submit(() => postJSON(path, payload)). Every
+// submitted job_id is also remembered so its result is downloaded into the
+// local cache automatically once it succeeds -- see autoCache.js.
 export function useSubmitJob(onSubmitted) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
@@ -87,6 +90,7 @@ export function useSubmitJob(onSubmitted) {
     setError(null);
     try {
       const result = await submitFn();
+      rememberSubmittedJob(result.job_id);
       setLastJobId(result.job_id);
       if (onSubmitted) onSubmitted();
       return result;

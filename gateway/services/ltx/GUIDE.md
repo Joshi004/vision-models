@@ -130,9 +130,10 @@ uploaded input no other job still uses -- this cannot be undone.
 ### 6. Uploads
 
 `POST /v1/uploads` once per file, before submitting a generation request that needs it. Cap:
-{{upload_mb}} MB per file. Uploaded files are **not** automatically deleted -- only finished job
-outputs expire ({{job_retention_days}} day(s) after they finish, on this deployment). Re-uploading
-the same bytes twice produces two different `asset_id`s; there's no dedup.
+{{upload_mb}} MB per file. {{upload_retention_text}} Re-uploading
+the same bytes twice produces two different `asset_id`s; there's no dedup. See "Retention" in the
+main guide for what this deployment keeps and for how long (including whether a result can be
+downloaded only once).
 
 Images are decoded and forced to RGB (the first 3 channels of whatever a standard image library
 returns) before use. Standard RGB JPEG/PNG works reliably; grayscale or palette-mode images may not

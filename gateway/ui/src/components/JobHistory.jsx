@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { cancelJob, purgeJob } from '../api.js';
+import { forgetSubmittedJob, useAutoCacheResults } from '../autoCache.js';
 import { deleteCachedResult } from '../resultCache.js';
 import { ACTIVE_STATUSES, useJobList } from '../utils.js';
 import { usePersistedState } from '../storage.js';
@@ -37,6 +38,7 @@ export default function JobHistory({ jobRetentionDays, preserveJobData, onRetry,
     storage: window.sessionStorage,
   });
   const [searchText, setSearchText] = usePersistedState('historyFilter:search', '', { storage: window.sessionStorage });
+  useAutoCacheResults(jobs);
 
   const pipelines = useMemo(() => Array.from(new Set(jobs.map((job) => job.pipeline))).sort(), [jobs]);
 
@@ -77,6 +79,7 @@ export default function JobHistory({ jobRetentionDays, preserveJobData, onRetry,
     try {
       const result = await purgeJob(job.job_id);
       await deleteCachedResult(job.job_id);
+      forgetSubmittedJob(job.job_id);
       const removedCount = result.removed_asset_ids.length;
       const keptCount = result.kept_asset_ids.length;
       const parts = [`Deleted job ${job.job_id}.`];

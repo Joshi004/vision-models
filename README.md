@@ -55,8 +55,10 @@ Applio looks up its pretrained files relative to its own folder, so those (`rvc/
 ```bash
 cp vision.env.example vision.env     # optional, edit
 set -a; source vision.env; set +a
-gateway/run.sh                       # starts the API in a tmux session on port 8012
+gateway/run.sh                       # (re)starts the API in a tmux session, always on port 8012
 ```
+
+`gateway/run.sh` always restarts: it stops the running gateway (on this node, anything else of yours on port 8012, and -- over ssh if it can -- one started on another login node), starts a fresh one and waits for `/v1/health`. It prints which node it is on: forward port 8012 from that node (`ssh -N -L 8012:localhost:8012 <you>@<node>`). The workspace's `.vscode/settings.json` pins Cursor's forward of 8012 to local port 8012.
 
 By default the gateway keeps no job data: no logs, uploaded inputs are deleted when their job ends, and a result can be downloaded once, after which it is deleted. Set `MODEL_API_PRESERVE_JOB_DATA=true` in `vision.env` to keep everything for `MODEL_API_RETENTION_DAYS` instead. `./purge_all_data.sh` deletes every job's logs, inputs and outputs on demand (`--dry-run` to preview; it refuses while jobs are running).
 

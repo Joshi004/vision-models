@@ -5,9 +5,11 @@
 // re-expanding a job row, switching between the Jobs panel and Job
 // History, and even a full page reload -- instead of re-downloading the
 // same file from the cluster every time "Load preview" is clicked. See
-// components/ResultPreview.jsx, the only reader/writer of the cache
-// itself, and components/JobRow.jsx, which reads useIsResultCached below
-// to show a "Cached" badge without needing ResultPreview mounted at all.
+// autoCache.js, the only writer (both automatic downloads and "Load
+// preview" clicks go through it), components/ResultPreview.jsx, which
+// reads cached results back, and components/JobRow.jsx, which reads
+// useIsResultCached below to show a "Cached" badge without needing
+// ResultPreview mounted at all.
 //
 // IndexedDB, not localStorage/sessionStorage (see storage.js) -- results
 // are binary blobs that can be tens of MB, well beyond localStorage's
@@ -72,6 +74,17 @@ function notifyChange(jobId, cached) {
 
 // --- public API ----------------------------------------------------------
 
+// True if IndexedDB can be opened at all -- autoCache.js checks this before
+// downloading anything automatically.
+export async function isCacheAvailable() {
+  try {
+    await openDb();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // True if jobId's result is already cached -- a lightweight key-only
 // lookup (no blob bytes touched) suitable for checking many jobs at once,
 // e.g. once per visible row.
@@ -107,9 +120,11 @@ export async function getCachedResult(jobId) {
 
 // Stores blob under jobId, then evicts the oldest cached entries (if any)
 // until the total stays under MAX_CACHE_BYTES. Best-effort throughout --
-// ResultPreview already has the blob in hand for this render regardless
-// of whether caching it for next time actually succeeds.
+// resolves true if the blob was stored, false otherwise (including a blob
+// bigger than the whole cap, which eviction would immediately remove
+// again), so the caller can keep its own copy instead.
 export async function putCachedResult(jobId, blob) {
+  if (blob.size > MAX_CACHE_BYTES) return false;
   try {
     const db = await openDb();
     const record = { jobId, blob, size: blob.size, cachedAt: Date.now() };
@@ -120,8 +135,10 @@ export async function putCachedResult(jobId, blob) {
     });
     notifyChange(jobId, true);
     await evictOldestUntilUnderCap(db);
+    return true;
   } catch {
     // See module docstring -- caching is best-effort.
+    return false;
   }
 }
 
