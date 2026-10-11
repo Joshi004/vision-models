@@ -1,4 +1,4 @@
-## LTX-2.5 -- text/image-to-video, first/last-frame interpolation, and retake, with native multi-shot
+## LTX-2.5 -- text/image-to-video, first/last-frame interpolation, audio-to-video, and retake, with native multi-shot
 
 This section is the prose companion to this backend's own endpoints. The endpoint reference
 generated below (straight from this server's own `/openapi.json`) is the source of truth for exact
@@ -22,15 +22,16 @@ backend.
 |---|---|---|
 | Multi-shot (cuts inside one clip) | No -- one continuous shot | Yes, written into the prompt |
 | `mode: "quality"` | Dev checkpoint with CFG/STG guidance + distilled LoRA | DFR: distilled transformer + generated keyframes + detailing pass |
-| `negative_prompt` | Supported (quality mode) | Not available -- neither recipe uses guidance |
-| Clip length | `duration_seconds` / `num_frames` | Same, plus `auto_duration` (model picks from the prompt) |
+| `negative_prompt` | Supported (quality mode) | Audio-to-video only -- the fast and DFR recipes don't use guidance |
+| Clip length | `duration_seconds` / `num_frames` | Same, plus `auto_duration` (model picks from the prompt), and on audio-to-video, `audio_max_duration` to match the audio |
 | Video decoder | Standard VAE | Convolutional VAE on this deployment (LTX-2.5 also ships a heavier diffusion decoder, which is not used here -- it corrupted the last fraction of a second of a 10-second test clip) |
 | Text encoder | Gemma 3 12B | Gemma 4 12B, fine-tuned for LTX |
-| Recipes on this server | Text/image-to-video, keyframe interpolation, audio-to-video, retake, text-to-audio | Text/image-to-video, first/last-frame interpolation, retake |
+| Recipes on this server | Text/image-to-video, keyframe interpolation, audio-to-video, retake, text-to-audio | Text/image-to-video, first/last-frame interpolation, audio-to-video, retake |
 
-Audio-to-video and text-to-audio are not available on this backend yet; use the LTX-2.3 backend
-for those. LTX-2.3's keyframe interpolation accepts any number of keyframes; this backend's
-`interpolate` takes exactly a first and a last frame (and, unlike 2.3's, has a fast mode).
+Text-to-audio is not available on this backend yet; use the LTX-2.3 backend for that. LTX-2.3's
+keyframe interpolation accepts any number of keyframes; this backend's `interpolate` takes exactly
+a first and a last frame (and, unlike 2.3's, has a fast mode). Audio-to-video works like 2.3's
+(guided, quality only) but can also size the clip to the audio (`audio_max_duration`).
 
 ### 3. Endpoint chooser
 
@@ -38,10 +39,12 @@ for those. LTX-2.3's keyframe interpolation accepts any number of keyframes; thi
 |---|---|---|---|
 | `POST /v1/ltx25/videos/generate` | video (MP4) | fast **or** quality (DFR), your choice | `prompt`, optional `images` |
 | `POST /v1/ltx25/videos/interpolate` | video (MP4) | fast **or** quality (DFR), your choice | `first_frame_asset_id`, `last_frame_asset_id`, `prompt` |
+| `POST /v1/ltx25/videos/audio-to-video` | video (MP4) | guided two-stage only (dev transformer + distilled LoRA) | `audio_asset_id`, `prompt`, optional `images`, `audio_max_duration` |
 | `POST /v1/ltx25/videos/retake` | video (MP4) | distilled only | `video_asset_id`, `prompt`, `start_time`, `end_time` |
 
 MP4 outputs are H.264 video + AAC audio, muxed together. Video and audio are generated jointly:
-quoted dialogue in the prompt comes out lip-synced.
+quoted dialogue in the prompt comes out lip-synced. Audio-to-video is the exception: its audio is
+your uploaded track, muxed in unchanged, and only the video is generated.
 
 ### 4. Job lifecycle, timing, and shared-cluster etiquette
 
@@ -64,6 +67,7 @@ once on a cold cache took 5.5-10.6 minutes each. **Budget 5-10 minutes per reque
 | Quality (DFR) | 5s | ~5-10.5 min | ~56 GB |
 | Interpolate (fast or quality) | 5s | ~7 min (14 min once, on a slow node while the cluster was busy) | not measured |
 | Retake | 5s source video | ~5-6 min | ~50 GB |
+| Audio-to-video | 5s | not measured yet -- weights are installed, but no real run has been timed (expect slower than fast/DFR: 30 guided steps on the dev transformer) | not measured |
 
 Fast mode with `auto_duration` chose 2.4s for a one-line spoken sentence and 4.0s for a short
 scene description. `"quality"` (DFR) costs more than `"fast"` in GPU memory and, on a cold cache,
@@ -96,6 +100,11 @@ of requests.
 - `POST /v1/ltx25/videos/interpolate` has no `auto_duration` (the last frame's position needs a known
   length), and both frame images are resized and center-cropped to the output size, so give them
   the output's aspect ratio (16:9 for `landscape`, 9:16 for `portrait`) to avoid unwanted cropping.
+- `POST /v1/ltx25/videos/audio-to-video` sizes the clip one of two ways: a fixed length
+  (`duration_seconds`/`num_frames`, default ~5s, audio cut to fit), or **match audio** --
+  set `audio_max_duration` (up to 20s) and the clip is as long as the audio actually read from
+  `audio_start_time` (shorter if the file ends first), snapped to `8k+1` frames. The two can't be
+  combined (422).
 - `POST /v1/ltx25/videos/retake`'s source video must **already** have `8k+1` frames and width/height
   that are multiples of 32. A video produced by `POST /v1/ltx25/videos/generate` already satisfies
   this; an arbitrary video you upload from elsewhere might not. Uploads are {{upload_mb}} MB max
@@ -132,6 +141,11 @@ mode. So: use frames of the same place, subject, and lighting, and make the chan
 plausible movement. If you want a hard change of shot, use `POST /v1/ltx25/videos/generate` with a
 multi-shot prompt instead.
 
+**Audio-to-video**: describe the *visible* speaker and scene that should match the audio -- who is
+speaking, their appearance, the setting, the camera. The audio is not regenerated, so there is no
+need to quote its words. To pin the speaker's look, attach a reference photo in `images` at
+`frame_idx: 0`. `negative_prompt` is honored on this endpoint only.
+
 **Retake**: describe only the content of the replaced `[start_time, end_time]` window, as if it
 were the whole prompt for a short standalone clip.
 
@@ -164,7 +178,7 @@ Example (3 shots, `duration_seconds: 10`):
 
 #### Other prompt-related fields
 
-- `enhance_prompt` has a Gemma instruct model rewrite your prompt into a richer one before
+- `enhance_prompt` (generate and interpolate) has a Gemma instruct model rewrite your prompt into a richer one before
   generation. Useful for a short or vague prompt; less useful if you've already written a detailed,
   structured one. **The rewritten prompt is not returned in the API response.** It loads a second
   language model on the GPU node, so it adds to the job's load time.
@@ -184,9 +198,10 @@ resolution means the uploaded source video doesn't satisfy the shape rules in se
 
 ### 9. Known limitations
 
-- Only text/image-to-video, first/last-frame interpolation, and retake are wired up; audio-to-video
-  and text-to-audio exist only on the LTX-2.3 backend for now. Interpolation takes exactly two
+- Text-to-audio exists only on the LTX-2.3 backend for now. Interpolation takes exactly two
   frames (first and last), not an arbitrary list of keyframes.
+- Audio-to-video has no fast mode (the distilled and DFR pipelines take no audio input) and no
+  `enhance_prompt`.
 - Height/width and retake-source constraints aren't validated at submission time, only discovered
   after a job is already running.
 - The prompt actually used after `enhance_prompt` rewriting is never returned.

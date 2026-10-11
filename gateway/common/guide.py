@@ -91,32 +91,25 @@ def _static_facts() -> dict[str, str]:
             "once on this deployment right now; a request past that cap gets a 429."
         )
     days = _fmt_days(config.JOB_RETENTION_DAYS)
-    if config.PRESERVE_JOB_DATA:
-        retention_text = (
-            f"**Retention:** finished jobs (and their output files) are deleted automatically {days} day(s) "
-            "after they finish. Uploaded assets are **not** auto-deleted."
-        )
-        upload_retention_text = (
-            f"Uploaded files are **not** automatically deleted (unlike finished job outputs, which expire "
-            f"after {days} days)."
-        )
-    else:
-        retention_text = (
-            "**Retention (this deployment keeps no job data):** no logs are stored. An uploaded input is deleted as soon as "
-            "the job that used it ends (so upload again for each request, and a Retry needs fresh uploads), or "
-            f"{config.UNUSED_UPLOAD_TTL_MINUTES:g} minute(s) after upload if no job used it. **A result can be "
-            "downloaded once:** the file is deleted right after it has been sent in full (an interrupted "
-            "download keeps it; a `Range` request does not count), after which `GET /v1/jobs/{job_id}/result` "
-            "returns 410 and the job's `downloaded_at` is set. Download results as soon as they are ready and "
-            "keep your own copy. A result nobody downloads is deleted "
-            f"{days} day(s) after the job finishes. Once its data is deleted a job keeps only a minimal record "
-            "(status, pipeline, timings; `request` is `{}`); a failed job keeps a one-line `error`. "
-            "`GET /v1/health` reports `preserve_job_data`."
-        )
-        upload_retention_text = (
-            f"On this deployment an uploaded file is deleted when the job that used it ends, or "
-            f"{config.UNUSED_UPLOAD_TTL_MINUTES:g} minute(s) after upload if no job used it."
-        )
+    retention_text = (
+        f"**Retention:** by default everything about a job -- its prompt/settings, uploaded inputs, logs and "
+        f"output -- is kept until you delete it (`DELETE /v1/jobs/{{job_id}}/purge`) or {days} day(s) pass after "
+        "it finishes, whichever comes first. **Incognito:** any generation request may set `incognito: true` "
+        "to opt that one job out of all of that. An incognito job stores no logs; its uploaded inputs are "
+        "deleted as soon as the job ends (so a Retry needs fresh uploads); and its result can be downloaded "
+        "**once** -- the file is deleted right after it has been sent in full (an interrupted download keeps it; "
+        "a `Range` request does not count), after which `GET /v1/jobs/{job_id}/result` returns 410 and the "
+        "job's `downloaded_at` is set, so download it as soon as it is ready and keep your own copy. Once its "
+        "data is deleted an incognito job keeps only a minimal record (status, pipeline, timings; `request` is "
+        "`{}`; a failed one keeps a one-line `error`). Jobs report `incognito` in `GET /v1/jobs/{job_id}`. "
+        f"An uploaded file that no job references is deleted {config.UNUSED_UPLOAD_TTL_MINUTES:g} minute(s) "
+        "after upload."
+    )
+    upload_retention_text = (
+        "An uploaded file is kept for as long as a job references it, and is deleted when that job is purged "
+        "or expires; with `incognito: true` it is deleted as soon as that job ends. A file no job references "
+        f"is deleted {config.UNUSED_UPLOAD_TTL_MINUTES:g} minute(s) after upload."
+    )
     return {
         "upload_mb": str(upload_mb),
         "retention_text": retention_text,
@@ -371,7 +364,6 @@ def render(app: Any, backends: list[BackendInfo], base_url: str) -> tuple[str, d
         "limits": {
             "max_upload_mb": config.MAX_UPLOAD_BYTES // (1024 * 1024),
             "job_retention_days": config.JOB_RETENTION_DAYS,
-            "preserve_job_data": config.PRESERVE_JOB_DATA,
             "max_inflight_jobs": config.MAX_INFLIGHT_JOBS,
         },
         "polling": {

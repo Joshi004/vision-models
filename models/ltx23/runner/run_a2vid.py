@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Runs LTX-2.3's audio-to-video pipeline (`ltx_pipelines.a2vid_two_stage`)
-for one `/v1/ltx/videos/audio-to-video` request, after first converting the
-input audio to a stereo WAV. See `gateway/services/ltx/dispatch.py`, which
-builds the argv below, and `gateway/common/run_pipeline_job.py`, which
+"""Runs the audio-to-video pipeline (`ltx_pipelines.a2vid_two_stage`) for one
+`/v1/ltx/videos/audio-to-video` (LTX-2.3) or `/v1/ltx25/videos/audio-to-video`
+(LTX-2.5) request, after first converting the input audio to a stereo WAV.
+See `gateway/services/ltx/dispatch.py` and `gateway/services/ltx25/dispatch.py`,
+which build the argv below, and `gateway/common/run_pipeline_job.py`, which
 invokes this on the compute node.
 
-Why: the LTX-2.3 audio VAE encoder only accepts 2-channel (stereo) audio,
+Why: the LTX-2.3 and LTX-2.5 audio VAE encoders only accept 2-channel (stereo) audio,
 and the final MP4 mux rejects anything else too, but upstream's
 `decode_audio_from_file` keeps whatever channel count the file has. A mono
 file (e.g. Breeze TTS output, most voice recordings) therefore fails with
@@ -14,8 +15,10 @@ channels at full level, surround is downmixed. The sample rate is kept as-is:
 the pipeline resamples for the encoder itself and muxes AAC at the source
 rate.
 
-Must be run with LTX-2.3's own venv interpreter -- `ltx_pipelines` and
-`imageio-ffmpeg` (the only ffmpeg on this cluster) only exist there.
+Must be run with the target model's own venv interpreter (LTX-2.3's or
+LTX-2.5's): the pipeline runs as `sys.executable -m ...`, so it is that
+venv's `ltx_pipelines`. Both venvs need `av` and `imageio-ffmpeg` (the only
+ffmpeg on this cluster).
 
 Usage:
     run_a2vid.py --audio-path FILE --work-dir DIR -- <a2vid_two_stage args>

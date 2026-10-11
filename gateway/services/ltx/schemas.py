@@ -8,8 +8,9 @@ groups (e.g. several --image entries, each with its own frame index and
 strength) into a single multipart/form-data request.
 
 Every request body here also gets an optional `partition` field via
-common.schemas.PartitionOptionMixin -- see that module for the shared
-fallback behavior, identical across every backend.
+common.schemas.PartitionOptionMixin and an optional `incognito` field via
+common.schemas.IncognitoOptionMixin -- see that module for the shared
+behavior, identical across every backend.
 
 Field-level `description`/`examples` here are what an LLM agent (or a human
 in /docs) sees when inspecting the schema directly -- they're written to
@@ -25,7 +26,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from common.schemas import PartitionOptionMixin
+from common.schemas import IncognitoOptionMixin, PartitionOptionMixin
 from services.ltx import config
 
 
@@ -132,7 +133,7 @@ class VideoShapeMixin(BaseModel):
         return self
 
 
-class TextToVideoRequest(VideoShapeMixin, PartitionOptionMixin):
+class TextToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin):
     """Request body for POST /v1/ltx/videos/generate -- text-to-video, or
     image-to-video when `images` is non-empty. See that endpoint's
     description for the fast-vs-quality tradeoff."""
@@ -190,7 +191,7 @@ class TextToVideoRequest(VideoShapeMixin, PartitionOptionMixin):
     )
 
 
-class KeyframeInterpolationRequest(VideoShapeMixin, PartitionOptionMixin):
+class KeyframeInterpolationRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin):
     """Request body for POST /v1/ltx/videos/keyframe-interpolation.
 
     Quality recipe only -- no distilled/fast variant is wired up for this
@@ -218,7 +219,7 @@ class KeyframeInterpolationRequest(VideoShapeMixin, PartitionOptionMixin):
     )
 
 
-class AudioToVideoRequest(VideoShapeMixin, PartitionOptionMixin):
+class AudioToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin):
     """Request body for POST /v1/ltx/videos/audio-to-video.
 
     Quality recipe only -- same reason as keyframe interpolation."""
@@ -253,7 +254,7 @@ class AudioToVideoRequest(VideoShapeMixin, PartitionOptionMixin):
     )
 
 
-class RetakeRequest(PartitionOptionMixin):
+class RetakeRequest(PartitionOptionMixin, IncognitoOptionMixin):
     """Request body for POST /v1/ltx/videos/retake.
 
     Distilled/fast checkpoint only -- that's the only variant the underlying
@@ -288,7 +289,7 @@ class RetakeRequest(PartitionOptionMixin):
         return self
 
 
-class TextToAudioRequest(PartitionOptionMixin):
+class TextToAudioRequest(PartitionOptionMixin, IncognitoOptionMixin):
     """Request body for POST /v1/ltx/audio/generate -- audio only, no video.
 
     Dev checkpoint only -- that's the only variant the underlying

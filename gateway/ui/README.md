@@ -57,16 +57,27 @@ the API's own `/ui` path.
   `src/components/JobRow.jsx` for one job's row, shared with the smaller
   `JobsPanel.jsx` strip shown under every form), with permanent delete via
   `DELETE /v1/jobs/{job_id}/purge`.
-- Data retention: the server keeps no job data by default (`preserve_job_data`
-  false in `GET /v1/health`), and the UI follows it. A result is a one-time
-  download -- `components/ResultPreview.jsx` says so before loading it, and the
-  browser's own copy (IndexedDB, see `resultCache.js`) is what remains. Retry
-  is hidden for a job whose data was deleted (its `request` is `{}`), and
-  clears reused upload ids from the pre-filled form, since uploads are deleted
-  when their job ends (see `src/App.jsx`'s `withoutAssetIds`).
+- Incognito mode: the switch in `components/Header.jsx` (state in `src/App.jsx`,
+  remembered across visits) makes `postJSON` in `src/api.js` add
+  `incognito: true` to every job submission -- the one place all forms submit
+  through, so no form needs to know about it (`src/incognito.js` holds the
+  current value). Jobs are otherwise kept in full until purged or
+  `job_retention_days` pass. An incognito job (`job.incognito` in the jobs
+  list, shown as a badge by `JobRow.jsx`) has its data deleted by the server:
+  its result is a one-time download -- `components/ResultPreview.jsx` says so
+  before loading it, and the browser's own copy (IndexedDB, see
+  `resultCache.js`) is what remains. Retry is hidden for a job whose data was
+  deleted (its `request` is `{}`), and clears reused upload ids from the
+  pre-filled form of an incognito job, since its uploads are deleted when it
+  ends (see `src/App.jsx`'s `withoutAssetIds`).
 - `src/forms/` -- one form per generation recipe, each mapping 1:1 onto a
-  request schema in `services/ltx/schemas.py`, `services/wan_animate/schemas.py`,
-  `services/rvc/schemas.py`, or `services/parakeet/schemas.py`. The simplest
+  request schema in `services/ltx/schemas.py`, `services/ltx25/schemas.py`,
+  `services/wan_animate/schemas.py`, `services/rvc/schemas.py`, or
+  `services/parakeet/schemas.py`. Where an LTX-2.5 recipe has the same fields
+  as LTX-2.3's, the 2.3 form is reused through the recipe's `formProps` in
+  `src/App.jsx` instead of copied: `RetakeForm.jsx` for retake, and
+  `AudioToVideoForm.jsx` for audio-to-video (plus a "Match audio" length
+  choice, `matchAudioLength`). The simplest
   one is `TranscribeForm.jsx` (Parakeet transcription): one file upload plus
   an optional partition override, nothing else -- its result is a JSON
   transcript, rendered by `components/TranscriptView.jsx` (full text with a

@@ -25,7 +25,7 @@ const STATUS_OPTIONS = [
 //
 // `onRetry`/`canRetry` come from App.jsx unchanged -- see JobRow.jsx for
 // what each does; this component has no retry logic of its own.
-export default function JobHistory({ jobRetentionDays, preserveJobData, onRetry, canRetry }) {
+export default function JobHistory({ jobRetentionDays, onRetry, canRetry }) {
   const { jobs, loaded, error, setError, now, refresh } = useJobList(500);
   const [expandedId, setExpandedId] = useState(null);
   const [cancellingId, setCancellingId] = useState(null);
@@ -99,10 +99,10 @@ export default function JobHistory({ jobRetentionDays, preserveJobData, onRetry,
       <div>
         <h2 className="text-lg font-semibold text-text">Job history</h2>
         <p className="text-sm text-muted">
-          Everything this server still has, newest first.{' '}
-          {preserveJobData === false
-            ? 'This server keeps no job data: a result can be downloaded once and is then deleted, and only a minimal record of each job stays here.'
-            : `Finished jobs are removed automatically${jobRetentionDays != null ? ` ${jobRetentionDays}` : ''} days after they finish.`}
+          Everything this server still has, newest first. Finished jobs are removed automatically
+          {jobRetentionDays != null ? ` ${jobRetentionDays}` : ''} days after they finish. A job submitted with
+          Incognito on is the exception: its result can be downloaded once and is then deleted, and only a minimal
+          record of it stays here.
         </p>
       </div>
 

@@ -154,8 +154,8 @@ async def poll_forever() -> None:
                 _check_one(row)
             iteration += 1
             if iteration == 1 or iteration % _CLEANUP_EVERY_N_POLLS == 0:
-                # Re-apply the no-retention rules to anything already finished
-                # (no-op when MODEL_API_PRESERVE_JOB_DATA is true).
+                # Re-apply the incognito rules to any finished incognito job
+                # that still has data, and delete unreferenced uploads.
                 retention.sweep()
             if iteration % _CLEANUP_EVERY_N_POLLS == 0:
                 _cleanup_old_jobs()

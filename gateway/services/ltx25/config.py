@@ -48,6 +48,13 @@ SPATIAL_UPSCALER = MODEL_DIR / "latent_upscale_models" / "ltx-2.5-latent-spatial
 DURATION_HEAD = MODEL_DIR / "model_patches" / "ltx-2.5-duration-head-bf16.safetensors"
 # Stage-2 detailing IC-LoRA used only by the "quality" (DFR) recipe.
 DETAILING_LORA = MODEL_DIR / "loras" / "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors"
+# Audio-to-video only: upstream's guided two-stage A2Vid pipeline runs the
+# full (dev) transformer in stage 1 and adds the distilled LoRA in stage 2.
+DEV_TRANSFORMER = MODEL_DIR / "diffusion_models" / "ltx-2.5-22b-dev-transformer-bf16.safetensors"
+DISTILLED_LORA = MODEL_DIR / "loras" / "ltx-2.5-22b-distilled-lora-450-bf16.safetensors"
+# Upstream's default LoRA strength; no 2.5-specific value is documented
+# (LTX-2.3's recipe uses 0.8 with its own, different LoRA).
+DISTILLED_LORA_STRENGTH = 1.0
 
 # Two interchangeable video VAEs ship with 2.5: "diffusion" (upstream's
 # higher-quality decoder) and "conv" (lighter, no extra dependencies).
@@ -79,6 +86,11 @@ ENHANCER_GEMMA_DIR = Path(
 )
 
 RUN_PIPELINE_JOB_SCRIPT = common_config.MODEL_API_DIR / "common" / "run_pipeline_job.py"
+
+# Converts the input audio to stereo before running a2vid_two_stage (the
+# audio VAE only accepts 2 channels). Shared with LTX-2.3: the script runs
+# whichever venv's ltx_pipelines invoked it, so here it runs 2.5's.
+RUN_A2VID_SCRIPT = ltx_config.RUN_A2VID_SCRIPT
 
 # Video/audio shape defaults (24 fps, 1920x1088 / 1088x1920, 121 frames, the
 # 8k+1 frame rule) are deliberately not repeated here: LTX-2.5 uses exactly

@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from pydantic import Field, model_validator
 
-from common.schemas import PartitionOptionMixin
+from common.schemas import IncognitoOptionMixin, PartitionOptionMixin
 from services.breeze_tts import config
 
 _ACCEPTED_REFERENCE_FORMATS = ", ".join(sorted(ext.lstrip(".") for ext in config.REFERENCE_EXTENSIONS))
 
 
-class SynthesizeRequest(PartitionOptionMixin):
+class SynthesizeRequest(PartitionOptionMixin, IncognitoOptionMixin):
     """Request body for POST /v1/breeze-tts/synthesize.
 
     The mode is chosen by which optional fields are present:

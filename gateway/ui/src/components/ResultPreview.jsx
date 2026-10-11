@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { getHealth } from '../api.js';
 import { getUncachedResult, isLoadingResult, loadResult, onResultLoaded } from '../autoCache.js';
 import { getCachedResult } from '../resultCache.js';
 import ProgressBar from './ProgressBar.jsx';
@@ -19,19 +18,6 @@ const AUDIO_PIPELINES = new Set(['ltx:text-to-audio', 'rvc:convert', 'breeze-tts
 // Qwen-Image-2.1 results are PNG images (RGB, or RGBA when transparent) --
 // rendered with an <img> on a checkerboard so transparency is visible.
 const IMAGE_PIPELINES = new Set(['qwen-image21:generate', 'qwen-image21:edit']);
-
-// Whether the server deletes a result once it has been downloaded (GET
-// /v1/health preserve_job_data false). Fetched once for the whole page; null
-// (unknown) if the health call fails.
-let keepsNoDataPromise = null;
-function serverKeepsNoData() {
-  if (!keepsNoDataPromise) {
-    keepsNoDataPromise = getHealth()
-      .then((health) => health.preserve_job_data === false)
-      .catch(() => false);
-  }
-  return keepsNoDataPromise;
-}
 
 function isImagePipeline(pipeline) {
   return IMAGE_PIPELINES.has(pipeline);
@@ -95,7 +81,10 @@ function resultExtension(pipeline, request) {
 // read as text and JSON-parsed for TranscriptView -- see handleBlob below.
 // The object URL still backs the Download link either way, same as every
 // other pipeline.
-export default function ResultPreview({ jobId, pipeline, request }) {
+//
+// `incognito` (the job's own `incognito` flag): the server deletes an
+// incognito job's result once it has been downloaded, so the button says so.
+export default function ResultPreview({ jobId, pipeline, request, incognito = false }) {
   const [url, setUrl] = useState(null);
   const [transcript, setTranscript] = useState(null);
   const [progress, setProgress] = useState(null);
@@ -110,10 +99,6 @@ export default function ResultPreview({ jobId, pipeline, request }) {
   const hasBlobRef = useRef(false);
 
   const isTranscript = isTranscriptPipeline(pipeline);
-  const [oneTimeDownload, setOneTimeDownload] = useState(false);
-  useEffect(() => {
-    serverKeepsNoData().then(setOneTimeDownload);
-  }, []);
 
   useEffect(() => {
     return () => {
@@ -184,7 +169,7 @@ export default function ResultPreview({ jobId, pipeline, request }) {
           {isZip ? 'Load result' : 'Load preview'}
         </Button>
       )}
-      {!url && !progress && !checkingCache && oneTimeDownload && (
+      {!url && !progress && !checkingCache && incognito && (
         <p className="text-xs text-muted">
           One-time download: loading it deletes the result from the server; this browser keeps a local copy.
         </p>

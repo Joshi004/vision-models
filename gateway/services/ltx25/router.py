@@ -2,7 +2,7 @@
 
 Shared infrastructure (job status/result/cancel, uploads) lives at
 the top level in server.py / common/, not here -- this router only has the
-endpoints that are specific to LTX-2.5's three recipes.
+endpoints that are specific to LTX-2.5's four recipes.
 """
 
 from __future__ import annotations
@@ -14,7 +14,12 @@ from fastapi import APIRouter, Body, HTTPException
 from common import openapi_docs as common_docs
 from common.schemas import JobSubmitResponse
 from services.ltx25 import dispatch, openapi_docs as ltx25_docs
-from services.ltx25.schemas import Ltx25InterpolateRequest, Ltx25RetakeRequest, Ltx25TextToVideoRequest
+from services.ltx25.schemas import (
+    Ltx25AudioToVideoRequest,
+    Ltx25InterpolateRequest,
+    Ltx25RetakeRequest,
+    Ltx25TextToVideoRequest,
+)
 
 router = APIRouter()
 
@@ -57,6 +62,20 @@ def interpolate(
     req: Annotated[Ltx25InterpolateRequest, Body(openapi_examples=ltx25_docs.INTERPOLATE_EXAMPLES)],
 ) -> JobSubmitResponse:
     return _submit(dispatch.dispatch_interpolate, req)
+
+
+@router.post(
+    "/videos/audio-to-video",
+    tags=["Video generation"],
+    summary="Generate video conditioned on a given audio track (LTX-2.5)",
+    description=ltx25_docs.AUDIO_TO_VIDEO,
+    response_model=JobSubmitResponse,
+    responses=common_docs.SUBMIT_RESPONSES,
+)
+def audio_to_video(
+    req: Annotated[Ltx25AudioToVideoRequest, Body(openapi_examples=ltx25_docs.AUDIO_TO_VIDEO_EXAMPLES)],
+) -> JobSubmitResponse:
+    return _submit(dispatch.dispatch_audio_to_video, req)
 
 
 @router.post(

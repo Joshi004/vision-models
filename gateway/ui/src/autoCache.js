@@ -4,9 +4,9 @@
 // (resultCache.js) as soon as the job succeeds, so expanding its row shows
 // the preview instantly -- but only for jobs submitted from this browser.
 // The jobs list also shows jobs submitted by curl, scripts or agents, and
-// on a server with preserve_job_data false a download deletes the result
-// from the server, so auto-downloading those would take them away from
-// whoever submitted them. Every other job still loads only when its
+// downloading an incognito job's result deletes it from the server, so
+// auto-downloading those would take them away from whoever submitted them.
+// Every other job still loads only when its
 // "Load preview" button is clicked (components/ResultPreview.jsx).
 //
 // Every download -- automatic, or a "Load preview" click -- goes through

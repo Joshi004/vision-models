@@ -81,6 +81,7 @@ export default function JobRow({
       <button type="button" onClick={onToggleExpand} className="flex w-full flex-wrap items-center gap-3 px-3 py-2.5 text-left text-sm">
         <Badge tone={STATUS_TONE[job.status] ?? 'neutral'}>{job.status}</Badge>
         {isCached && <Badge tone="accent">Cached</Badge>}
+        {job.incognito && <Badge tone="warning">Incognito</Badge>}
         <span className="text-text">{job.pipeline}</span>
         <JobTimingSummary job={job} now={now} />
         <span className="font-mono text-xs text-muted">{job.job_id.slice(0, 8)}</span>
@@ -118,7 +119,9 @@ export default function JobRow({
           {job.downloaded_at && (
             <p className="text-xs text-muted">Result was downloaded and deleted from the server.</p>
           )}
-          {job.result_ready && <ResultPreview jobId={job.job_id} pipeline={job.pipeline} request={job.request} />}
+          {job.result_ready && (
+            <ResultPreview jobId={job.job_id} pipeline={job.pipeline} request={job.request} incognito={job.incognito} />
+          )}
 
           {/* Every job's exact submitted request, for debugging a failed job
              later or just double-checking what was actually sent -- the

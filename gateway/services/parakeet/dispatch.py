@@ -78,7 +78,9 @@ def build_transcribe_args(req: TranscribeRequest, job_dir: Path, output_path: Pa
     ]
 
 
-def _submit_slurm_job(job_id: str, job_dir: Path, module_args: list[str], output_path: Path, partition: str) -> str:
+def _submit_slurm_job(
+    job_id: str, job_dir: Path, module_args: list[str], output_path: Path, partition: str, incognito: bool
+) -> str:
     """Write args.json + submit via sbatch (non-blocking). Returns the
     Slurm job id. See services/rvc/dispatch.py's own _submit_slurm_job for
     the fuller rationale behind this shape (partial-path rewrite,
@@ -107,7 +109,7 @@ def _submit_slurm_job(job_id: str, job_dir: Path, module_args: list[str], output
         f"--mem-per-gpu={config.MEM_PER_GPU}",
         f"--time={config.JOB_TIME_LIMIT}",
         f"--job-name={common_config.SLURM_JOB_NAME_PREFIX}parakeet-api-{job_id[:8]}",
-        f"--output={retention.slurm_log_path(job_dir)}",
+        f"--output={retention.slurm_log_path(job_dir, incognito)}",
         f"--wrap={wrap_str}",
     ]
     result = subprocess.run(sbatch_cmd, capture_output=True, text=True)
@@ -132,9 +134,11 @@ def dispatch_transcribe(req: TranscribeRequest) -> str:
     module_args = build_transcribe_args(req, job_dir, output_path)
 
     job_dir.mkdir(parents=True)
-    job_store.create_job(job_id, "parakeet:transcribe", job_dir, req.model_dump(mode="json"), partition)
+    job_store.create_job(
+        job_id, "parakeet:transcribe", job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito
+    )
     try:
-        slurm_job_id = _submit_slurm_job(job_id, job_dir, module_args, output_path, partition)
+        slurm_job_id = _submit_slurm_job(job_id, job_dir, module_args, output_path, partition, req.incognito)
     except DispatchError:
         job_store.mark_failed(job_id, "Could not submit the Slurm job.")
         raise

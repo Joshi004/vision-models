@@ -1,15 +1,17 @@
 """Pydantic request models for LTX-2.5's generation endpoints.
 
-Deliberately small: this LTX-2.5 backend ships three recipes -- text/
-image-to-video (fast or quality), first/last-frame interpolation, and retake.
+Deliberately small: this LTX-2.5 backend ships four recipes -- text/
+image-to-video (fast or quality), first/last-frame interpolation, retake, and
+audio-to-video.
 The shape fields (orientation/
 height/width/duration/frame rate), image conditioning, and retake window are
 identical to LTX-2.3's, so they're reused from services/ltx/schemas.py
 instead of redefined here.
 
 What differs from LTX-2.3, and why:
-  * No `negative_prompt`: both 2.5 recipes (distilled and DFR) run with
-    guidance off, so there is nothing for a negative prompt to act on.
+  * No `negative_prompt` on generate/interpolate: both of their recipes
+    (distilled and DFR) run with guidance off, so there is nothing for a
+    negative prompt to act on. Audio-to-video is guided, so it has one.
   * `mode="quality"` runs the DFR pipeline (distilled transformer plus a
     detailing IC-LoRA), not LTX-2.3's dev-checkpoint-with-CFG recipe.
   * `auto_duration`: LTX-2.5's duration head can pick the clip length from
@@ -26,11 +28,11 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from common.schemas import PartitionOptionMixin
+from common.schemas import IncognitoOptionMixin, PartitionOptionMixin
 from services.ltx.schemas import ImageConditioning, RetakeRequest, VideoShapeMixin
 
 
-class Ltx25TextToVideoRequest(VideoShapeMixin, PartitionOptionMixin):
+class Ltx25TextToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin):
     """Request body for POST /v1/ltx25/videos/generate -- text-to-video, or
     image-to-video when `images` is non-empty. See that endpoint's
     description for the fast-vs-quality tradeoff."""
@@ -99,7 +101,7 @@ class Ltx25TextToVideoRequest(VideoShapeMixin, PartitionOptionMixin):
         return self
 
 
-class Ltx25InterpolateRequest(VideoShapeMixin, PartitionOptionMixin):
+class Ltx25InterpolateRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin):
     """Request body for POST /v1/ltx25/videos/interpolate -- generates the
     motion between a given first frame and a given last frame.
 
@@ -160,6 +162,81 @@ class Ltx25InterpolateRequest(VideoShapeMixin, PartitionOptionMixin):
         ),
         examples=[False],
     )
+
+
+class Ltx25AudioToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin):
+    """Request body for POST /v1/ltx25/videos/audio-to-video -- generates video
+    to match a given audio track, which is muxed into the output unchanged.
+
+    One recipe only: upstream's guided two-stage A2Vid pipeline (dev
+    transformer + distilled LoRA). The distilled and DFR pipelines have no
+    audio input, so there is no `mode`.
+
+    Clip length has two mutually exclusive sources, because LTX-2.5's A2Vid
+    pipeline refuses a frame count and an audio duration together: either a
+    fixed length (`duration_seconds`/`num_frames`, default ~5s) with the audio
+    cut to fit, or `audio_max_duration`, which makes the clip as long as the
+    audio slice actually read."""
+
+    prompt: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Describes the visible speaker/scene that should match the conditioning audio (who is "
+            "speaking, their appearance, the setting, the camera). The audio itself is not "
+            "regenerated, so there is no need to quote its dialogue."
+        ),
+        examples=[
+            "A man in a blue collared shirt sits at a desk, speaking directly to the camera with "
+            "natural hand gestures, soft office lighting behind him."
+        ],
+    )
+    negative_prompt: str | None = Field(
+        None,
+        description=(
+            "What to steer away from. Honored here (this recipe runs with guidance), unlike on the "
+            "other LTX-2.5 endpoints. When omitted, the pipeline's own built-in negative prompt "
+            "(blur, artifacts, bad lip sync, ...) is used; a value given here replaces it."
+        ),
+        examples=[None],
+    )
+    seed: int = Field(10, description="Random seed; same seed + inputs = same video.", examples=[10])
+    audio_asset_id: str = Field(
+        ...,
+        description=(
+            "asset_id (from POST /v1/uploads) of the audio/video file whose audio track conditions "
+            "generation. Mono audio is converted to stereo first. This audio is muxed into the "
+            "output unchanged, not regenerated."
+        ),
+        examples=["3f2a9c1e4b7d4a6c9e8f1a2b3c4d5e6f"],
+    )
+    audio_start_time: float = Field(
+        0.0, ge=0, description="Seconds into the source audio file to start reading from.", examples=[0.0]
+    )
+    audio_max_duration: float | None = Field(
+        None,
+        gt=0,
+        le=20,
+        description=(
+            "Match the clip length to the audio: read at most this many seconds of audio (from "
+            "`audio_start_time`) and make the video exactly as long as the audio actually read -- "
+            "shorter if the file ends first. Snapped to the nearest valid frame count. Mutually "
+            "exclusive with `duration_seconds` and `num_frames`. When omitted, the clip has a "
+            "fixed length (`duration_seconds`/`num_frames`, default ~5s) and the audio is cut to "
+            "that length."
+        ),
+        examples=[None],
+    )
+    images: list[ImageConditioning] = Field(
+        default_factory=list,
+        description="Optional image conditioning (e.g. to pin the speaker's appearance to a reference photo at frame 0).",
+    )
+
+    @model_validator(mode="after")
+    def _check_audio_length(self):
+        if self.audio_max_duration is not None and (self.duration_seconds is not None or self.num_frames is not None):
+            raise ValueError("'audio_max_duration' cannot be combined with 'duration_seconds' or 'num_frames'.")
+        return self
 
 
 class Ltx25RetakeRequest(RetakeRequest):

@@ -17,6 +17,7 @@ httpcore==1.0.9
 httpx==0.28.1
 huggingface-hub==1.33.0
 idna==3.20
+imageio-ffmpeg==0.6.0
 jinja2==3.1.6
 -e @REPO_ROOT@/third_party/ltx-2.5/packages/ltx-core
 -e @REPO_ROOT@/third_party/ltx-2.5/packages/ltx-pipelines

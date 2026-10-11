@@ -200,6 +200,7 @@ def _submit_slurm_job(
     output_path: Path,
     partition: str,
     *,
+    incognito: bool,
     job_name: str,
     time_limit: str,
     extra_sbatch_args: list[str] | None = None,
@@ -214,7 +215,9 @@ def _submit_slurm_job(
     python3` resolves to on the compute node -- see run_batch.py's own
     header comment for why that distinction matters; run_convert.py's own
     `import normalize_audio` needs the same venv for the same reason).
-    `job_name`/`time_limit` let each caller keep its own existing values;
+    `incognito` decides whether Slurm's own log is written at all (see
+    retention.slurm_log_path). `job_name`/`time_limit` let each caller keep
+    its own existing values;
     `extra_sbatch_args` is only non-empty for batch jobs today (see
     dispatch_batch_convert's own --dependency=singleton)."""
     partial_path = job_dir / f"output.partial{output_path.suffix}"
@@ -237,7 +240,7 @@ def _submit_slurm_job(
         f"--mem-per-gpu={config.MEM_PER_GPU}",
         f"--time={time_limit}",
         f"--job-name={common_config.SLURM_JOB_NAME_PREFIX}{job_name}",
-        f"--output={retention.slurm_log_path(job_dir)}",
+        f"--output={retention.slurm_log_path(job_dir, incognito)}",
         *(extra_sbatch_args or []),
         f"--wrap={wrap_str}",
     ]
@@ -263,7 +266,7 @@ def dispatch_convert(req: ConvertRequest) -> str:
     module_args = build_convert_args(req, job_dir, output_path)
 
     job_dir.mkdir(parents=True)
-    job_store.create_job(job_id, "rvc:convert", job_dir, req.model_dump(mode="json"), partition)
+    job_store.create_job(job_id, "rvc:convert", job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito)
     try:
         slurm_job_id = _submit_slurm_job(
             job_id,
@@ -272,6 +275,7 @@ def dispatch_convert(req: ConvertRequest) -> str:
             module_args,
             output_path,
             partition,
+            incognito=req.incognito,
             job_name=f"rvc-api-{job_id[:8]}",
             time_limit=config.JOB_TIME_LIMIT,
         )
@@ -313,7 +317,9 @@ def dispatch_batch_convert(req: BatchConvertRequest) -> str:
 
     module_args = build_batch_convert_args(req, input_dir, work_dir, output_dir, output_path)
 
-    job_store.create_job(job_id, "rvc:batch-convert", job_dir, req.model_dump(mode="json"), partition)
+    job_store.create_job(
+        job_id, "rvc:batch-convert", job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito
+    )
     try:
         slurm_job_id = _submit_slurm_job(
             job_id,
@@ -322,6 +328,7 @@ def dispatch_batch_convert(req: BatchConvertRequest) -> str:
             module_args,
             output_path,
             partition,
+            incognito=req.incognito,
             job_name=config.BATCH_SLURM_JOB_NAME,
             time_limit=config.BATCH_JOB_TIME_LIMIT,
             extra_sbatch_args=["--dependency=singleton"],

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from common.schemas import PartitionOptionMixin
+from common.schemas import IncognitoOptionMixin, PartitionOptionMixin
 from services.parakeet import config
 
 # Every accepted input extension, formatted once for reuse in
@@ -21,7 +21,7 @@ from services.parakeet import config
 _ACCEPTED_INPUT_FORMATS = ", ".join(sorted(ext.lstrip(".") for ext in config.INPUT_EXTENSIONS))
 
 
-class TranscribeRequest(PartitionOptionMixin):
+class TranscribeRequest(PartitionOptionMixin, IncognitoOptionMixin):
     """Request body for POST /v1/parakeet/transcribe.
 
     Transcribes an existing audio or video recording to text, with both

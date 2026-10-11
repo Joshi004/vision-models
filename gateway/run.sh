@@ -19,11 +19,10 @@
 #   MODEL_API_HOST                        (default 0.0.0.0; the port is always 8012)
 #   MODEL_API_FALLBACK_PARTITION          (default "background")
 #   MODEL_API_MAX_INFLIGHT                (optional soft concurrency cap, global across backends)
-#   MODEL_API_RETENTION_DAYS              (finished job cleanup, default 7)
-#   MODEL_API_PRESERVE_JOB_DATA           (default false: keep no logs/inputs/outputs -- inputs are deleted when their job ends,
-#                                          a result is deleted right after its first complete download. true: keep everything
-#                                          until MODEL_API_RETENTION_DAYS, as before)
-#   MODEL_API_UNUSED_UPLOAD_TTL_MINUTES   (only when not preserving: delete never-used uploads after this long, default 60)
+#   MODEL_API_RETENTION_DAYS              (finished job cleanup, default 7; a request sent with "incognito": true is the
+#                                          exception: its inputs are deleted when its job ends, its result right after its
+#                                          first complete download, and it keeps no logs)
+#   MODEL_API_UNUSED_UPLOAD_TTL_MINUTES   (delete uploads that no job references after this long, default 60)
 #
 #   VISION_DATA_DIR                       (default <repo>/../vision-data: envs/, weights/, jobs/, jobs.db live here)
 #

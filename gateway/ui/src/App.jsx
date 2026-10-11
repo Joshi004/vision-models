@@ -21,6 +21,7 @@ import { QwenImageGenerateForm, QwenImageEditForm } from './forms/QwenImageForm.
 import { getHealth, getOpenApi } from './api.js';
 import { extractSchemas, SchemaContext } from './schema.js';
 import { usePersistedState } from './storage.js';
+import { setIncognito as setGlobalIncognito } from './incognito.js';
 
 // One group per backend this API actually has recipes for -- MAGI-2.2 and
 // Qwen3-VL have no endpoints yet (see STATUS.md), so there's nothing to
@@ -105,6 +106,25 @@ const RECIPES = [
     pipeline: 'ltx25:interpolate',
   },
   {
+    id: 'ltx25-audio-to-video',
+    label: 'Audio to video',
+    description: "Generate a video synced to an existing audio/video track's speech on LTX-2.5.",
+    group: 'ltx25',
+    icon: WaveIcon,
+    Component: AudioToVideoForm,
+    // Same form as LTX-2.3's Audio to video, pointed at LTX-2.5's own
+    // endpoint and schema, plus a "Match audio" length choice -- see the
+    // props at the top of forms/AudioToVideoForm.jsx.
+    formProps: {
+      formId: 'ltx25-audio-to-video',
+      model: 'Ltx25AudioToVideoRequest',
+      endpoint: '/v1/ltx25/videos/audio-to-video',
+      title: 'Audio to video (LTX-2.5)',
+      matchAudioLength: true,
+    },
+    pipeline: 'ltx25:audio-to-video',
+  },
+  {
     id: 'ltx25-retake',
     label: 'Retake',
     description: 'Regenerate a short window of an existing video on LTX-2.5.',
@@ -186,16 +206,16 @@ const RECIPES = [
 // pipeline -- the only jobs JobRow.jsx offers a Retry button for (see
 // canRetry prop threaded through JobsPanel.jsx/JobHistory.jsx below).
 function canRetry(job) {
-  // A job whose data was deleted (the server keeps no job data by default, see
-  // GET /v1/health preserve_job_data) has an empty request -- nothing to prefill.
+  // A job whose data was deleted (an incognito job, once it has finished) has an
+  // empty request -- nothing to prefill.
   const hasRequest = Object.keys(job.request ?? {}).length > 0;
   return hasRequest && RECIPES.some((recipe) => recipe.pipeline === job.pipeline);
 }
 
 // A copy of a stored request without any uploaded-file references
-// (`asset_id`, `*_asset_id`, `*_asset_ids`). Used by Retry when the server
-// deletes uploads as soon as their job ends: reusing those ids would only fail
-// with a 400, so the form asks for the files again instead.
+// (`asset_id`, `*_asset_id`, `*_asset_ids`). Used by Retry for an incognito job,
+// whose uploads the server deletes as soon as the job ends: reusing those ids
+// would only fail with a 400, so the form asks for the files again instead.
 function withoutAssetIds(value) {
   if (Array.isArray(value)) return value.map(withoutAssetIds);
   if (value && typeof value === 'object') {
@@ -221,6 +241,15 @@ function isValidActiveId(id) {
 export default function App() {
   const [health, setHealth] = useState(null);
   const [healthError, setHealthError] = useState(null);
+  // The Header's Incognito switch. Persisted so it stays on until turned off,
+  // and mirrored into incognito.js, which api.js's postJSON reads when a form
+  // submits -- every submission carries `incognito: true` while it is on.
+  const [incognito, setIncognito] = usePersistedState('incognitoMode', false, {
+    validate: (value) => typeof value === 'boolean',
+  });
+  useEffect(() => {
+    setGlobalIncognito(incognito);
+  }, [incognito]);
   // Persisted so reopening the tab lands back on the recipe last used
   // instead of always resetting to the first one -- validated against
   // RECIPES/HISTORY_ID in case a stored id no longer exists (e.g. after a
@@ -326,8 +355,9 @@ export default function App() {
     const recipe = RECIPES.find((r) => r.pipeline === job.pipeline);
     if (!recipe) return;
     setActiveId(recipe.id);
-    const keepsData = health?.preserve_job_data !== false;
-    setPrefill({ job: keepsData ? job : { ...job, request: withoutAssetIds(job.request) }, nonce: Date.now() });
+    // An incognito job's uploads were deleted when it ended, so its asset ids
+    // are dead; any other job's uploads are still on the server.
+    setPrefill({ job: job.incognito ? { ...job, request: withoutAssetIds(job.request) } : job, nonce: Date.now() });
     mainRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
@@ -343,7 +373,7 @@ export default function App() {
     <ToastProvider>
       <SchemaContext.Provider value={schemas}>
         <div className="flex h-screen flex-col overflow-hidden bg-bg text-text">
-          <Header health={health} healthError={healthError} />
+          <Header health={health} healthError={healthError} incognito={incognito} onToggleIncognito={setIncognito} />
           {schemaError && (
             <p className="border-b border-border bg-surface px-5 py-1.5 text-xs text-warning">
               Field help unavailable ({schemaError}) &mdash; forms still work, just without hover descriptions or
@@ -362,7 +392,7 @@ export default function App() {
             <main ref={mainRef} className="flex-1 overflow-y-auto">
               {showingHistory ? (
                 <div className="px-5 py-6 lg:px-10">
-                  <JobHistory jobRetentionDays={health?.job_retention_days} preserveJobData={health?.preserve_job_data} onRetry={handleRetry} canRetry={canRetry} />
+                  <JobHistory jobRetentionDays={health?.job_retention_days} onRetry={handleRetry} canRetry={canRetry} />
                 </div>
               ) : (
                 <div className="flex flex-col gap-6 px-5 py-6 lg:flex-row lg:gap-10 lg:px-10">

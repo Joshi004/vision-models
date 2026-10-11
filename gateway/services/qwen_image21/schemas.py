@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from common.schemas import PartitionOptionMixin
+from common.schemas import IncognitoOptionMixin, PartitionOptionMixin
 from services.qwen_image21 import config
 
 AspectRatio = Literal["1:1", "4:3", "3:4", "3:2", "2:3", "16:9", "9:16"]
@@ -20,7 +20,7 @@ _ASPECT_RATIO_SIZES = ", ".join(f"`{name}` = {w}x{h}" for name, (w, h) in config
 _ACCEPTED_IMAGE_FORMATS = ", ".join(sorted(ext.lstrip(".") for ext in config.REFERENCE_IMAGE_EXTENSIONS))
 
 
-class _ImageRequestBase(PartitionOptionMixin):
+class _ImageRequestBase(PartitionOptionMixin, IncognitoOptionMixin):
     """Fields shared by generate and edit."""
 
     prompt: str = Field(

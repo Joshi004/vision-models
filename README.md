@@ -60,7 +60,7 @@ gateway/run.sh                       # (re)starts the API in a tmux session, alw
 
 `gateway/run.sh` always restarts: it stops the running gateway (on this node, anything else of yours on port 8012, and -- over ssh if it can -- one started on another login node), starts a fresh one and waits for `/v1/health`. It prints which node it is on: forward port 8012 from that node (`ssh -N -L 8012:localhost:8012 <you>@<node>`). The workspace's `.vscode/settings.json` pins Cursor's forward of 8012 to local port 8012.
 
-By default the gateway keeps no job data: no logs, uploaded inputs are deleted when their job ends, and a result can be downloaded once, after which it is deleted. Set `MODEL_API_PRESERVE_JOB_DATA=true` in `vision.env` to keep everything for `MODEL_API_RETENTION_DAYS` instead. `./purge_all_data.sh` deletes every job's logs, inputs and outputs on demand (`--dry-run` to preview; it refuses while jobs are running).
+By default the gateway keeps everything about a job (logs, uploaded inputs, outputs, the request) for `MODEL_API_RETENTION_DAYS` or until the job is purged. A request sent with `"incognito": true` (the web UI's Incognito switch) is the exception: it keeps no logs, its uploaded inputs are deleted when its job ends, and its result can be downloaded once, after which it is deleted. `./purge_all_data.sh` deletes every job's logs, inputs and outputs on demand (`--dry-run` to preview; it refuses while jobs are running).
 
 The API docs are at `/docs`, the integration guide at `/v1/guide`, the web UI at `/ui/`.
 

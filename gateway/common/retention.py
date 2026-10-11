@@ -1,8 +1,12 @@
 """What this server keeps on disk, and when it deletes it.
 
-Everything here is a no-op when config.PRESERVE_JOB_DATA is true (the old
-behavior: keep everything until config.JOB_RETENTION_DAYS pass or the job is
-purged). When it is false (the default):
+A normal job (its request's `incognito` is false, the default) is kept in
+full -- logs, uploaded inputs, output, and the request body -- until it is
+purged by hand or config.JOB_RETENTION_DAYS pass (common/poller.py). Nothing
+in this module touches such a job.
+
+A job submitted with `incognito: true` (stored as the job row's `incognito`
+column) gets these rules instead:
 
   * Slurm's own log is not written at all (slurm_log_path -> /dev/null).
     run.log still exists while a job is queued/running -- the live-progress
@@ -17,12 +21,13 @@ purged). When it is false (the default):
   * Whenever a job's data is removed, its database row is scrubbed to a
     minimal record (job_store.scrub_job): status, pipeline and timings stay;
     the prompt/settings, asset ids and output path are gone.
-  * Uploads nothing references are deleted after
-    config.UNUSED_UPLOAD_TTL_MINUTES.
 
-sweep() re-applies these rules to everything finished, so a crash between a
-job ending and its cleanup, a job whose submission failed, and data that
-already existed when the flag was switched off are all cleaned up too.
+Independent of incognito, uploads that no job references at all are deleted
+after config.UNUSED_UPLOAD_TTL_MINUTES (see sweep_unused_uploads).
+
+sweep() re-applies the incognito rules to every finished incognito job, so a
+crash between a job ending and its cleanup, or a job whose submission failed,
+is cleaned up too.
 
 Public functions never raise: a cleanup problem is logged and retried by the
 next sweep, and must not break the poller or a download.
@@ -44,10 +49,10 @@ _LOG_TAIL_MARKER = "--- last lines of run.log ---"
 _MAX_ERROR_CHARS = 500
 
 
-def slurm_log_path(job_dir: Path) -> str:
-    """Where `sbatch --output=` should write: the job's slurm.log when
-    preserving, otherwise /dev/null so no Slurm log is ever stored."""
-    return str(job_dir / "slurm.log") if config.PRESERVE_JOB_DATA else "/dev/null"
+def slurm_log_path(job_dir: Path, incognito: bool) -> str:
+    """Where `sbatch --output=` should write: the job's slurm.log normally,
+    but /dev/null for an incognito job so no Slurm log is ever stored."""
+    return "/dev/null" if incognito else str(job_dir / "slurm.log")
 
 
 def short_error(error: str | None) -> str | None:
@@ -90,12 +95,10 @@ def _delete_unreferenced_inputs(row) -> None:
 
 
 def on_job_succeeded(job_id: str) -> None:
-    """Keep only the output file; delete the inputs."""
-    if config.PRESERVE_JOB_DATA:
-        return
+    """Incognito jobs only: keep only the output file; delete the inputs."""
     try:
         row = job_store.get_job(job_id)
-        if row is None or job_store.is_scrubbed(row):
+        if row is None or not row["incognito"] or job_store.is_scrubbed(row):
             return
         job_dir = _job_dir(row)
         if job_dir is not None:
@@ -109,12 +112,11 @@ def on_job_succeeded(job_id: str) -> None:
 
 
 def on_job_failed(job_id: str) -> None:
-    """Delete the whole folder and the inputs; keep a one-line error."""
-    if config.PRESERVE_JOB_DATA:
-        return
+    """Incognito jobs only: delete the whole folder and the inputs; keep a
+    one-line error."""
     try:
         row = job_store.get_job(job_id)
-        if row is None or job_store.is_scrubbed(row):
+        if row is None or not row["incognito"] or job_store.is_scrubbed(row):
             return
         job_dir = _job_dir(row)
         if job_dir is not None:
@@ -126,13 +128,12 @@ def on_job_failed(job_id: str) -> None:
 
 
 def on_result_downloaded(job_id: str) -> None:
-    """The result was sent in full: delete the output and the folder, and scrub
-    the record (job_store.scrub_job also stamps downloaded_at)."""
-    if config.PRESERVE_JOB_DATA:
-        return
+    """Incognito jobs only: the result was sent in full, so delete the output
+    and the folder, and scrub the record (job_store.scrub_job also stamps
+    downloaded_at)."""
     try:
         row = job_store.get_job(job_id)
-        if row is None:
+        if row is None or not row["incognito"]:
             return
         # Record the download first: if removing the folder fails below (e.g.
         # another download of the same file is still open on the shared
@@ -148,10 +149,14 @@ def on_result_downloaded(job_id: str) -> None:
 
 
 def sweep_unused_uploads() -> None:
+    """Delete uploads that no job row references at all, once they are older
+    than config.UNUSED_UPLOAD_TTL_MINUTES (a file uploaded and never used, a
+    rejected submission, or the leftover of a job that has been purged or has
+    expired). An upload a kept job still references is never touched here."""
     cutoff = (datetime.now(timezone.utc) - timedelta(minutes=config.UNUSED_UPLOAD_TTL_MINUTES)).isoformat()
     for row in job_store.list_uploads_before(cutoff):
         try:
-            if not job_store.asset_in_flight(row["asset_id"]):
+            if not job_store.asset_in_use(row["asset_id"]):
                 storage.delete_upload(row["asset_id"])
                 logger.info("Deleted unused upload %s", row["asset_id"])
         except Exception:
@@ -159,10 +164,9 @@ def sweep_unused_uploads() -> None:
 
 
 def sweep() -> None:
-    """Apply every rule above to everything that is already finished."""
-    if config.PRESERVE_JOB_DATA:
-        return
-    for row in job_store.list_finished_unscrubbed():
+    """Apply the incognito rules above to every finished incognito job, then
+    delete uploads nothing references."""
+    for row in job_store.list_finished_unscrubbed_incognito():
         if row["status"] == "succeeded":
             on_job_succeeded(row["job_id"])
         else:

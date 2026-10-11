@@ -76,7 +76,9 @@ def build_args(req: QwenImageGenerateRequest | QwenImageEditRequest, output_path
     return args
 
 
-def _submit_slurm_job(job_id: str, job_dir: Path, module_args: list[str], output_path: Path, partition: str) -> str:
+def _submit_slurm_job(
+    job_id: str, job_dir: Path, module_args: list[str], output_path: Path, partition: str, incognito: bool
+) -> str:
     """Write args.json + submit via sbatch (non-blocking). Returns the Slurm
     job id."""
     partial_path = job_dir / f"output.partial{output_path.suffix}"
@@ -99,7 +101,7 @@ def _submit_slurm_job(job_id: str, job_dir: Path, module_args: list[str], output
         f"--mem-per-gpu={config.MEM_PER_GPU}",
         f"--time={config.JOB_TIME_LIMIT}",
         f"--job-name={common_config.SLURM_JOB_NAME_PREFIX}qwen-image21-api-{job_id[:8]}",
-        f"--output={retention.slurm_log_path(job_dir)}",
+        f"--output={retention.slurm_log_path(job_dir, incognito)}",
         f"--wrap={wrap_str}",
     ]
     result = subprocess.run(sbatch_cmd, capture_output=True, text=True)
@@ -124,9 +126,9 @@ def _dispatch(req: QwenImageGenerateRequest | QwenImageEditRequest, pipeline: st
     module_args = build_args(req, output_path)
 
     job_dir.mkdir(parents=True)
-    job_store.create_job(job_id, pipeline, job_dir, req.model_dump(mode="json"), partition)
+    job_store.create_job(job_id, pipeline, job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito)
     try:
-        slurm_job_id = _submit_slurm_job(job_id, job_dir, module_args, output_path, partition)
+        slurm_job_id = _submit_slurm_job(job_id, job_dir, module_args, output_path, partition, req.incognito)
     except DispatchError:
         job_store.mark_failed(job_id, "Could not submit the Slurm job.")
         raise

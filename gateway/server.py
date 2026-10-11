@@ -92,7 +92,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="GPU Cluster Model-Serving API",
-    version="0.9.0",
+    version="0.11.0",
     description=openapi_docs.APP_DESCRIPTION,
     openapi_tags=openapi_docs.TAGS_METADATA,
     lifespan=lifespan,
@@ -178,7 +178,6 @@ def health() -> HealthResponse:
     return HealthResponse(
         status="ok",
         default_partition=config.FALLBACK_PARTITION,
-        preserve_job_data=config.PRESERVE_JOB_DATA,
         job_retention_days=config.JOB_RETENTION_DAYS,
     )
 
@@ -288,6 +287,7 @@ def _row_to_status(row: sqlite3.Row, typical_cache: dict[str, tuple[float | None
         downloaded_at=row["downloaded_at"],
         error=row["error"],
         result_ready=row["status"] == "succeeded" and bool(row["output_path"]),
+        incognito=bool(row["incognito"]),
         typical_run_seconds=typical_run_seconds,
         typical_basis=typical_basis,
         progress=progress,
@@ -352,12 +352,12 @@ def job_result(job_id: _JOB_ID_PARAM, request: Request) -> FileResponse:
     output_path = Path(row["output_path"])
     if not output_path.exists():
         raise HTTPException(410, "Result file is no longer available (it may have expired).")
-    # Without MODEL_API_PRESERVE_JOB_DATA, the result is deleted as soon as it has
-    # been sent in full (this is a one-time download). OneTimeFileResponse runs
-    # the deletion only if the client stayed connected until the last chunk, so
-    # an aborted download keeps the file. A Range request is a partial download
-    # (e.g. a video player seeking), so it never triggers the deletion.
-    delete_after_sending = not config.PRESERVE_JOB_DATA and "range" not in request.headers
+    # An incognito job's result is deleted as soon as it has been sent in full
+    # (a one-time download); every other job's result is kept. OneTimeFileResponse
+    # runs the deletion only if the client stayed connected until the last chunk,
+    # so an aborted download keeps the file. A Range request is a partial
+    # download (e.g. a video player seeking), so it never triggers the deletion.
+    delete_after_sending = bool(row["incognito"]) and "range" not in request.headers
     return OneTimeFileResponse(
         output_path,
         filename=output_path.name,

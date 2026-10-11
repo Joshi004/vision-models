@@ -10,7 +10,7 @@ import SegmentedControl from './ui/SegmentedControl.jsx';
 // combination the API would otherwise reject with a 422.
 //
 // `model` selects which concrete request schema (TextToVideoRequest,
-// KeyframeInterpolationRequest, or AudioToVideoRequest) these fields'
+// KeyframeInterpolationRequest, AudioToVideoRequest, Ltx25AudioToVideoRequest, ...) these fields'
 // hover descriptions come from -- each declares them separately (even
 // though the text is often identical), so this can't be hardcoded to one.
 //
@@ -19,7 +19,16 @@ import SegmentedControl from './ui/SegmentedControl.jsx';
 // (LTX-2.5, see Ltx25TextToVideoForm.jsx). Choosing it sets
 // shape.lengthMode to 'auto', which toShapePayload (utils.js) turns into no
 // length fields at all; the form itself is what sends `auto_duration: true`.
-export default function VideoShapeFields({ model, shape, onChange, allowAutoLength = false }) {
+// `autoLengthLabel` renames that choice for a form whose length comes from
+// somewhere else (e.g. "Match audio" on LTX-2.5's audio-to-video, which
+// sends `audio_max_duration` instead).
+export default function VideoShapeFields({
+  model,
+  shape,
+  onChange,
+  allowAutoLength = false,
+  autoLengthLabel = 'Auto (from prompt)',
+}) {
   function patch(fields) {
     onChange({ ...shape, ...fields });
   }
@@ -66,7 +75,7 @@ export default function VideoShapeFields({ model, shape, onChange, allowAutoLeng
           { value: 'default', label: 'Default (~5s)' },
           { value: 'duration', label: 'Duration (s)' },
           { value: 'frames', label: 'Exact frames' },
-          ...(allowAutoLength ? [{ value: 'auto', label: 'Auto (from prompt)' }] : []),
+          ...(allowAutoLength ? [{ value: 'auto', label: autoLengthLabel }] : []),
         ]}
       />
 

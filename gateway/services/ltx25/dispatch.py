@@ -24,7 +24,12 @@ from common import job_store, retention, storage
 from common.slurm import resolve_partition
 from services.ltx import video_shape
 from services.ltx25 import config
-from services.ltx25.schemas import Ltx25InterpolateRequest, Ltx25RetakeRequest, Ltx25TextToVideoRequest
+from services.ltx25.schemas import (
+    Ltx25AudioToVideoRequest,
+    Ltx25InterpolateRequest,
+    Ltx25RetakeRequest,
+    Ltx25TextToVideoRequest,
+)
 
 
 class DispatchError(RuntimeError):
@@ -56,11 +61,12 @@ def _image_args(images: list) -> list[str]:
     return args
 
 
-def _split_weight_args(*, duration_head: bool = False) -> list[str]:
-    """The component flags every LTX-2.5 recipe here shares. The duration head
-    is only loaded when the clip length is being predicted from the prompt."""
+def _split_weight_args(*, transformer: Path = config.DISTILLED_TRANSFORMER, duration_head: bool = False) -> list[str]:
+    """The component flags every LTX-2.5 recipe here shares. Every recipe but
+    audio-to-video runs the distilled transformer. The duration head is only
+    loaded when the clip length is being predicted from the prompt."""
     args = [
-        "--transformer-path", str(config.DISTILLED_TRANSFORMER),
+        "--transformer-path", str(transformer),
         "--text-encoder-path", str(config.TEXT_ENCODER),
         "--video-vae-path", str(config.VIDEO_VAE),
         "--audio-vae-path", str(config.AUDIO_VAE),
@@ -72,7 +78,8 @@ def _split_weight_args(*, duration_head: bool = False) -> list[str]:
 
 # ---------------------------------------------------------------------------
 # Per-recipe argv builders. Each returns the args *after* the interpreter
-# (i.e. starting with "-m"), with --output-path already set to `output_path`
+# (i.e. starting with "-m", or with the run_a2vid.py script path for
+# audio-to-video), with --output-path already set to `output_path`
 # (_submit_slurm_job rewrites it to a partial path before actually submitting).
 # ---------------------------------------------------------------------------
 
@@ -179,6 +186,43 @@ def build_interpolate_args(req: Ltx25InterpolateRequest, output_path: Path) -> l
     return args
 
 
+def build_audio_to_video_args(req: Ltx25AudioToVideoRequest, output_path: Path) -> list[str]:
+    """Upstream's guided two-stage A2Vid pipeline, run through the shared
+    run_a2vid.py (converts the audio to stereo first, then runs
+    `-m ltx_pipelines.a2vid_two_stage` with everything after "--").
+
+    The pipeline rejects --num-frames together with --audio-max-duration, so
+    exactly one is passed: --audio-max-duration makes the clip length follow
+    the audio actually read; otherwise --num-frames fixes it."""
+    height, width = video_shape.resolve_dimensions(req.orientation, req.height, req.width)
+    audio_path = storage.resolve_asset_path(req.audio_asset_id)  # raises KeyError/FileNotFoundError
+    args = [
+        str(config.RUN_A2VID_SCRIPT),
+        "--audio-path", str(audio_path),
+        "--work-dir", str(output_path.parent),
+        "--",
+        *_split_weight_args(transformer=config.DEV_TRANSFORMER),
+        "--distilled-lora", str(config.DISTILLED_LORA), str(config.DISTILLED_LORA_STRENGTH),
+        "--spatial-upsampler-path", str(config.SPATIAL_UPSCALER),
+        f"--prompt={req.prompt}",
+        "--output-path", str(output_path),
+        "--seed", str(req.seed),
+        "--height", str(height),
+        "--width", str(width),
+        "--frame-rate", str(req.frame_rate),
+        "--audio-start-time", str(req.audio_start_time),
+    ]
+    if req.audio_max_duration is not None:
+        args += ["--audio-max-duration", str(req.audio_max_duration)]
+    else:
+        num_frames = video_shape.resolve_num_frames(req.duration_seconds, req.num_frames, req.frame_rate)
+        args += ["--num-frames", str(num_frames)]
+    if req.negative_prompt:
+        args.append(f"--negative-prompt={req.negative_prompt}")
+    args += _image_args(req.images)
+    return args
+
+
 def build_retake_args(req: Ltx25RetakeRequest, output_path: Path) -> list[str]:
     video_path = storage.resolve_asset_path(req.video_asset_id)
     return [
@@ -198,7 +242,9 @@ def build_retake_args(req: Ltx25RetakeRequest, output_path: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _submit_slurm_job(job_id: str, job_dir: Path, module_args: list[str], output_path: Path, partition: str) -> str:
+def _submit_slurm_job(
+    job_id: str, job_dir: Path, module_args: list[str], output_path: Path, partition: str, incognito: bool
+) -> str:
     """Write args.json + submit via sbatch (non-blocking). Returns the Slurm job id."""
     partial_path = job_dir / f"output.partial{output_path.suffix}"
     args = list(module_args)
@@ -221,7 +267,7 @@ def _submit_slurm_job(job_id: str, job_dir: Path, module_args: list[str], output
         f"--mem-per-gpu={config.MEM_PER_GPU}",
         f"--time={config.JOB_TIME_LIMIT}",
         f"--job-name={common_config.SLURM_JOB_NAME_PREFIX}{job_name}",
-        f"--output={retention.slurm_log_path(job_dir)}",
+        f"--output={retention.slurm_log_path(job_dir, incognito)}",
         f"--wrap={wrap_str}",
     ]
     result = subprocess.run(sbatch_cmd, capture_output=True, text=True)
@@ -245,9 +291,9 @@ def _dispatch(pipeline: str, req, output_suffix: str, build_args) -> str:
     module_args = build_args(req, output_path)
 
     job_dir.mkdir(parents=True)
-    job_store.create_job(job_id, pipeline, job_dir, req.model_dump(mode="json"), partition)
+    job_store.create_job(job_id, pipeline, job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito)
     try:
-        slurm_job_id = _submit_slurm_job(job_id, job_dir, module_args, output_path, partition)
+        slurm_job_id = _submit_slurm_job(job_id, job_dir, module_args, output_path, partition, req.incognito)
     except DispatchError:
         job_store.mark_failed(job_id, "Could not submit the Slurm job.")
         raise
@@ -261,6 +307,10 @@ def dispatch_text_to_video(req: Ltx25TextToVideoRequest) -> str:
 
 def dispatch_interpolate(req: Ltx25InterpolateRequest) -> str:
     return _dispatch("ltx25:interpolate", req, ".mp4", build_interpolate_args)
+
+
+def dispatch_audio_to_video(req: Ltx25AudioToVideoRequest) -> str:
+    return _dispatch("ltx25:audio-to-video", req, ".mp4", build_audio_to_video_args)
 
 
 def dispatch_retake(req: Ltx25RetakeRequest) -> str:

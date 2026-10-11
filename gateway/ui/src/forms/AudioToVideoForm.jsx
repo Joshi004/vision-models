@@ -25,8 +25,12 @@ import ImageConditioningList from '../components/ImageConditioningList.jsx';
 import PartitionField from '../components/PartitionField.jsx';
 import VideoShapeFields from '../components/VideoShapeFields.jsx';
 
-const MODEL = 'AudioToVideoRequest';
-const FORM_ID = 'ltx-audio-to-video';
+// Defaults are LTX-2.3's. App.jsx reuses this form for LTX-2.5's
+// audio-to-video by passing its own formId/model/endpoint/title plus
+// `matchAudioLength` (see the 'ltx25-audio-to-video' recipe's formProps).
+const DEFAULT_MODEL = 'AudioToVideoRequest';
+const DEFAULT_FORM_ID = 'ltx-audio-to-video';
+const DEFAULT_ENDPOINT = '/v1/ltx/videos/audio-to-video';
 
 const DEFAULTS = {
   prompt: '',
@@ -42,8 +46,12 @@ const DEFAULTS = {
 
 const REMEMBER_KEYS = ['seed', 'shape', 'partition'];
 
-function fromRequest(initialRequest) {
+function fromRequest(initialRequest, matchAudioLength) {
   if (!initialRequest) return null;
+  const shape = shapeFromRequest(initialRequest);
+  // On LTX-2.5 a stored audio_max_duration means the clip followed the
+  // audio, i.e. the 'auto' ("Match audio") length mode.
+  if (matchAudioLength && initialRequest.audio_max_duration != null) shape.lengthMode = 'auto';
   return {
     prompt: initialRequest.prompt ?? '',
     negativePrompt: initialRequest.negative_prompt ?? '',
@@ -52,27 +60,38 @@ function fromRequest(initialRequest) {
     audioStartTime: initialRequest.audio_start_time ?? 0,
     audioMaxDuration: initialRequest.audio_max_duration ?? '',
     images: imageEntriesFromRequest(initialRequest.images),
-    shape: shapeFromRequest(initialRequest),
+    shape,
     partition: initialRequest.partition ?? '',
   };
 }
 
-// Maps 1:1 onto AudioToVideoRequest (services/ltx/schemas.py). See
-// TextToVideoForm.jsx for how initialRequest/useFormState/FormShell fit
-// together. `audioStartTime`/`audioMaxDuration` describe a window on
-// whichever audio file is currently attached, so (like the audio file
-// itself) they aren't remembered as this form's "last settings" -- see
+// Maps 1:1 onto AudioToVideoRequest (services/ltx/schemas.py), or
+// Ltx25AudioToVideoRequest (services/ltx25/schemas.py) when given LTX-2.5's
+// formProps. See TextToVideoForm.jsx for how initialRequest/useFormState/
+// FormShell fit together. `audioStartTime`/`audioMaxDuration` describe a
+// window on whichever audio file is currently attached, so (like the audio
+// file itself) they aren't remembered as this form's "last settings" -- see
 // REMEMBER_KEYS -- only kept in the session draft.
+//
+// `matchAudioLength` (LTX-2.5): that backend won't take a fixed length and
+// audio_max_duration together, so audio_max_duration only appears (and is
+// required) under the "Match audio" length choice, where it sets the clip
+// length; any other length choice sends no audio_max_duration.
 export default function AudioToVideoForm({
   defaultPartition,
   onSubmitted,
   initialRequest = null,
   prefillJob = null,
   onClearPrefill,
+  formId: FORM_ID = DEFAULT_FORM_ID,
+  model: MODEL = DEFAULT_MODEL,
+  endpoint = DEFAULT_ENDPOINT,
+  title = 'Audio to video',
+  matchAudioLength = false,
 }) {
   const { values, setField, rememberSettings, reset, restoredDraft } = useFormState(FORM_ID, {
     defaults: DEFAULTS,
-    fromRequest: fromRequest(initialRequest),
+    fromRequest: fromRequest(initialRequest, matchAudioLength),
     rememberKeys: REMEMBER_KEYS,
   });
   const [advancedOpen, setAdvancedOpen] = usePersistedState(`advancedOpen:${FORM_ID}`, false);
@@ -90,8 +109,10 @@ export default function AudioToVideoForm({
     images: toImageConditioningPayload(images),
     ...toShapePayload(shape),
   };
+  const lengthFromAudio = matchAudioLength && shape.lengthMode === 'auto';
+  const showAudioMaxDuration = !matchAudioLength || lengthFromAudio;
   if (negativePrompt.trim()) payload.negative_prompt = negativePrompt;
-  if (audioMaxDuration !== '') payload.audio_max_duration = Number(audioMaxDuration);
+  if (showAudioMaxDuration && audioMaxDuration !== '') payload.audio_max_duration = Number(audioMaxDuration);
   if (partition.trim()) payload.partition = partition.trim();
 
   const blockers = [
@@ -99,19 +120,22 @@ export default function AudioToVideoForm({
     ...assetBlocker(audioAsset, 'the audio/video file'),
     ...imageListBlockers(images, 'Image'),
     ...shapeBlockers(shape),
+    ...(lengthFromAudio && audioMaxDuration === ''
+      ? ['audio_max_duration is required when "Match audio" is selected.']
+      : []),
   ];
 
   async function handleSubmit(event) {
     event.preventDefault();
     if (blockers.length > 0) return;
-    await submit(() => postJSON('/v1/ltx/videos/audio-to-video', payload));
+    await submit(() => postJSON(endpoint, payload));
   }
 
   return (
     <FormShell
-      title="Audio to video"
+      title={title}
       description="The source audio is muxed into the output unchanged, not regenerated."
-      endpoint="POST /v1/ltx/videos/audio-to-video"
+      endpoint={`POST ${endpoint}`}
       prefillJob={prefillJob}
       onClearPrefill={onClearPrefill}
       restoredDraft={restoredDraft}
@@ -159,17 +183,35 @@ export default function AudioToVideoForm({
               onChange={(event) => setField('audioStartTime', event.target.value)}
             />
           </FieldLabel>
-          <FieldLabel model={MODEL} field="audio_max_duration" text="audio_max_duration (defaults to the video's duration)">
-            <Input
-              type="number"
-              min="0"
-              step="0.1"
-              value={audioMaxDuration}
-              onChange={(event) => setField('audioMaxDuration', event.target.value)}
-            />
-          </FieldLabel>
+          {showAudioMaxDuration && (
+            <FieldLabel
+              model={MODEL}
+              field="audio_max_duration"
+              text={
+                matchAudioLength
+                  ? 'audio_max_duration (seconds; the clip matches the audio read)'
+                  : "audio_max_duration (defaults to the video's duration)"
+              }
+              required={lengthFromAudio}
+            >
+              <Input
+                type="number"
+                min="0"
+                max={matchAudioLength ? '20' : undefined}
+                step="0.1"
+                value={audioMaxDuration}
+                onChange={(event) => setField('audioMaxDuration', event.target.value)}
+              />
+            </FieldLabel>
+          )}
         </div>
-        <VideoShapeFields model={MODEL} shape={shape} onChange={(next) => setField('shape', next)} />
+        <VideoShapeFields
+          model={MODEL}
+          shape={shape}
+          onChange={(next) => setField('shape', next)}
+          allowAutoLength={matchAudioLength}
+          autoLengthLabel="Match audio"
+        />
       </Section>
 
       <CollapsibleSection title="Advanced" open={advancedOpen} onToggle={setAdvancedOpen}>

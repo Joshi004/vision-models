@@ -30,6 +30,26 @@ class PartitionOptionMixin(BaseModel):
     )
 
 
+class IncognitoOptionMixin(BaseModel):
+    """Adds an optional `incognito` field to a generation request. Shared by
+    every backend so the opt-out behaves identically everywhere -- see
+    common/retention.py for exactly what is deleted, and when."""
+
+    incognito: bool = Field(
+        False,
+        description=(
+            "If true, this job is not kept any longer than needed: no log is stored, its uploaded "
+            "inputs are deleted as soon as the job ends, its result can be downloaded only once (the "
+            "file is deleted right after it has been sent in full -- download it before it is gone), "
+            "and once it is done only a minimal record remains (status, pipeline, timings; `request` "
+            "becomes `{}`). If false (the default), everything about this job -- prompt/settings, "
+            "inputs, logs and output -- is kept until it is deleted by hand "
+            "(DELETE /v1/jobs/{job_id}/purge) or `job_retention_days` pass (see GET /v1/health)."
+        ),
+        examples=[False],
+    )
+
+
 class PartitionStatus(BaseModel):
     """One partition's live availability -- one entry in the response from
     GET /v1/partitions. Every number here is a snapshot, not a promise --
@@ -185,6 +205,7 @@ class JobStatusResponse(BaseModel):
             "ltx:text-to-audio",
             "ltx25:text-to-video",
             "ltx25:interpolate",
+            "ltx25:audio-to-video",
             "ltx25:retake",
             "wan-animate:replace",
             "rvc:convert",
@@ -225,7 +246,7 @@ class JobStatusResponse(BaseModel):
         None,
         description=(
             "ISO 8601 UTC timestamp when the result was downloaded in full and deleted from the server. "
-            "Only ever set when the server runs with `preserve_job_data` false (see GET /v1/health). "
+            "Only ever set for a job submitted with `incognito: true`. "
             "Once set, GET /v1/jobs/{job_id}/result returns 410."
         ),
         examples=[None],
@@ -234,10 +255,19 @@ class JobStatusResponse(BaseModel):
         None,
         description=(
             "Populated only when status='failed': a human-readable reason, plus (when available) the tail "
-            "of the pipeline's own log output -- or, when the server keeps no job data "
-            "(`preserve_job_data` false), just the reason and the last log line."
+            "of the pipeline's own log output -- or, for a job submitted with `incognito: true`, "
+            "just the reason and the last log line."
         ),
         examples=[None],
+    )
+    incognito: bool = Field(
+        False,
+        description=(
+            "True if this job was submitted with `incognito: true`: its data is deleted as soon as "
+            "it is no longer needed, and only a minimal record of it (this one) remains. False: "
+            "everything about the job is kept until it is purged or `job_retention_days` pass."
+        ),
+        examples=[False],
     )
     result_ready: bool = Field(
         False, description="True iff status='succeeded' and the output file is available for download right now."
@@ -310,21 +340,13 @@ class HealthResponse(BaseModel):
         description="The Slurm partition a generation request falls back to when it omits `partition`, or names one that doesn't currently exist.",
         examples=["background"],
     )
-    preserve_job_data: bool = Field(
-        ...,
-        description=(
-            "False (the default): this server keeps no logs or inputs, deletes a result right after it "
-            "has been downloaded once, and keeps only a minimal record of each job -- download results "
-            "as soon as they are ready. True: everything is kept until `job_retention_days` pass."
-        ),
-        examples=[False],
-    )
     job_retention_days: float = Field(
         ...,
         description=(
             "Finished jobs (and their output files) are deleted automatically this many days after "
             "they finish. A finished job can also be deleted immediately on request -- see "
-            "DELETE /v1/jobs/{job_id}/purge."
+            "DELETE /v1/jobs/{job_id}/purge. A job submitted with `incognito: true` does not wait "
+            "this long: its data is deleted as soon as it is no longer needed."
         ),
         examples=[7.0],
     )

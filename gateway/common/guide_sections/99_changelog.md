@@ -4,6 +4,22 @@ Dates are when a change shipped on this codebase, not necessarily when you're re
 `api_version` field (`GET /v1/guide?format=json`) is this server's own current version; compare it
 against what you last integrated against.
 
+- **0.11.0** (2026-10-11): **Behavior change: job data is now kept by default, and opting out is per
+  request.** Every generation request on every backend accepts a new optional boolean `incognito`
+  (default `false`). A normal job keeps everything -- prompt/settings, uploaded inputs, logs and output --
+  until it is purged (`DELETE /v1/jobs/{job_id}/purge`) or `job_retention_days` pass, and its result can
+  be downloaded any number of times. A job submitted with `incognito: true` gets the no-storage treatment
+  that 0.9.0 applied to every job: no logs, inputs deleted as soon as the job ends, a result that can be
+  downloaded **once** (then `410`, with `downloaded_at` set), and only a minimal record left in the jobs
+  list (`request` is `{}`). Jobs report `incognito` in `GET /v1/jobs` and `GET /v1/jobs/{job_id}`. The
+  server-wide `MODEL_API_PRESERVE_JOB_DATA` setting is gone, and `GET /v1/health` no longer reports
+  `preserve_job_data`. An uploaded file that no job references is still deleted after 60 minutes.
+- **0.10.0** (2026-10-11): Added `POST /v1/ltx25/videos/audio-to-video` to the LTX-2.5 backend --
+  generates video to match an uploaded audio track (`audio_asset_id`, `prompt`, optional `images` and
+  `negative_prompt`), which is muxed into the output unchanged. One guided recipe, no `mode`. Clip
+  length is either fixed (`duration_seconds`/`num_frames`) or matched to the audio with
+  `audio_max_duration` (up to 20s); the two can't be combined. Jobs it creates report their
+  `pipeline` as `ltx25:audio-to-video`. No change to any existing endpoint.
 - **0.9.0** (2026-10-10): **Behavior change: by default this server now keeps no job data.** With
   `MODEL_API_PRESERVE_JOB_DATA` false (the default; `GET /v1/health` reports it as `preserve_job_data`):
   no logs are stored; an uploaded input is deleted as soon as its job ends (or 60 minutes after upload

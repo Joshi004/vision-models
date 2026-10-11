@@ -118,9 +118,9 @@ cluster is busy, or report a job as `queued` for a long time. See `GET /v1/parti
 GPU/queue numbers, and the main guide's "Jobs and timing" section for what to expect while a job is
 queued or running.
 
-`preserve_job_data` tells you how this server treats your data. `false` (the default): no logs or
-inputs are kept, uploaded inputs are deleted when their job ends, and each result can be downloaded
-**once**, after which it is deleted. `true`: everything is kept for `job_retention_days`.
+`job_retention_days` is how long a finished job's data is kept before it is deleted automatically.
+A request sent with `incognito: true` is the exception: its data is not kept that long (see
+`incognito` on any generation request, and `GET /v1/guide` for the exact rules).
 """
 
 # ---------------------------------------------------------------------------
@@ -173,11 +173,11 @@ described in this API's top-level description, so old jobs eventually drop
 off this list on their own, the same as `GET /v1/jobs/{job_id}` would then
 404 for them.
 
-When this server keeps no job data (`preserve_job_data` is false in
-`GET /v1/health`, the default), a job whose data has been deleted -- its
-result was downloaded, or it failed -- stays here as a minimal record:
-`request` is `{}`, `downloaded_at` is set once its result was downloaded, and
-a failed job keeps a one-line `error`.
+A job submitted with `incognito: true` (reported as `incognito` on each entry),
+once its data has been deleted -- its result was downloaded, or it failed --
+stays here as a minimal record: `request` is `{}`, `downloaded_at` is set once
+its result was downloaded, and a failed job keeps a one-line `error`. Every
+other job keeps its full `request`.
 """
 
 JOB_STATUS = """
@@ -224,14 +224,14 @@ transcript itself -- see `POST /v1/parakeet/transcribe`'s own description for it
 
 Returns 409 if the job hasn't succeeded yet (check `GET /v1/jobs/{job_id}` first) and 410 if the
 result previously existed but is gone: expired per the retention policy described in the API's
-top-level description, or -- when this server keeps no job data (`preserve_job_data` is false in
-`GET /v1/health`, the default) -- **already downloaded**.
+top-level description, or -- for a job submitted with `incognito: true` -- **already downloaded**.
 
-**One-time download when `preserve_job_data` is false:** the file is deleted from the server right
-after it has been sent in full, and the job's `downloaded_at` is set. An interrupted download
-leaves the file in place, so you can simply try again. A request with a `Range` header is treated
-as a partial download and does not delete anything. Download results as soon as they are ready,
-and keep your own copy.
+**One-time download for an incognito job:** the file is deleted from the server right after it has
+been sent in full, and the job's `downloaded_at` is set. An interrupted download leaves the file in
+place, so you can simply try again. A request with a `Range` header is treated as a partial
+download and does not delete anything. Download results as soon as they are ready, and keep your own
+copy. A job that was not submitted as incognito keeps its result, and it can be downloaded any
+number of times until the job is purged or `job_retention_days` pass.
 """
 
 CANCEL_JOB = """
@@ -261,9 +261,9 @@ because at least one other job still references them.
 
 Distinct from the automatic {config.JOB_RETENTION_DAYS:g}-day cleanup described
 in this API's top-level description -- this deletes on request, immediately,
-regardless of how recently the job finished. When the server keeps no job data
-(`preserve_job_data` false in `GET /v1/health`), most of this has already
-happened by itself: purging then mostly removes the leftover minimal record.
+regardless of how recently the job finished. For a job submitted with
+`incognito: true`, most of this has already happened by itself: purging then
+mostly removes the leftover minimal record.
 """
 
 # ---------------------------------------------------------------------------
@@ -387,7 +387,7 @@ JOB_RESULT_RESPONSES = {
         },
     },
     410: {
-        "description": "The result file existed but has since expired / been cleaned up, or (when the server keeps no job data) was already downloaded once.",
+        "description": "The result file existed but has since expired / been cleaned up, or (for a job submitted with `incognito: true`) was already downloaded once.",
         "content": {
             "application/json": {"example": {"detail": "Result was already downloaded and has been deleted from the server."}}
         },

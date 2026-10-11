@@ -4,6 +4,8 @@
 // source of truth; this module only turns FastAPI's error bodies into a
 // plain message string every caller can just display.
 
+import { getIncognito } from './incognito.js';
+
 export class ApiError extends Error {
   constructor(message, status) {
     super(message);
@@ -59,11 +61,14 @@ export async function getJSON(path) {
   return response.json();
 }
 
+// Only ever used to submit a job (every recipe form goes through here), so
+// this is the one place the Incognito switch (see incognito.js) is applied:
+// while it is on, the request is sent with `incognito: true`.
 export async function postJSON(path, body) {
   const response = await request(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: JSON.stringify({ ...body, incognito: getIncognito() }),
   });
   return response.json();
 }

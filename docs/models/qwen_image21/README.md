@@ -59,7 +59,7 @@ Everything runs with no CPU offload on one 80 GB GPU. The runner sets `PYTORCH_A
 
 ## Data retention
 
-Results follow the gateway's retention setting (`MODEL_API_PRESERVE_JOB_DATA`, see the main README): by default an uploaded reference image is deleted when its job ends and the generated PNG is deleted right after it has been downloaded once.
+Results follow the gateway's retention rules (see the main README): by default an uploaded reference image and the generated PNG are kept until the job is purged or expires. A request sent with `incognito: true` is the exception: its reference images are deleted when its job ends and the generated PNG is deleted right after it has been downloaded once.
 
 ## License
 

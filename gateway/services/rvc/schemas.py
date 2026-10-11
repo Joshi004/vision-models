@@ -16,7 +16,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from common.schemas import PartitionOptionMixin
+from common.schemas import IncognitoOptionMixin, PartitionOptionMixin
 from services.rvc import config
 
 # Every accepted source-recording extension, formatted once for reuse in
@@ -27,7 +27,7 @@ from services.rvc import config
 _ACCEPTED_INPUT_FORMATS = ", ".join(sorted(ext.lstrip(".") for ext in config.INPUT_EXTENSIONS))
 
 
-class ConversionSettings(PartitionOptionMixin):
+class ConversionSettings(PartitionOptionMixin, IncognitoOptionMixin):
     """Fields shared by every RVC conversion request -- which pre-installed
     voice to convert to, and its own tuning knobs (pitch/f0_method/
     index_rate/protect/export_format) -- factored out so ConvertRequest

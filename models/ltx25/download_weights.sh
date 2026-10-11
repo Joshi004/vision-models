@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# download_weights.sh - Download the LTX-2.5 distilled split pack (plus the DFR
-# detailing IC-LoRA) into ltx-2.5/models/ltx-2.5/.
+# download_weights.sh - Download the LTX-2.5 split pack into
+# <vision-data>/weights/ltx25/ltx-2.5/: the distilled transformer (fast/DFR
+# recipes), the dev transformer + distilled LoRA (audio-to-video, ~51 GB of
+# the total), and the DFR detailing IC-LoRA.
 #
 # Both Hugging Face repos are gated. Before running this once:
 #   1. Accept the terms on https://huggingface.co/Lightricks/LTX-2.5
 #      and https://huggingface.co/Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler
-#   2. Log in with a Read token:  ltx-2.5/LTX-2/.venv/bin/hf auth login
+#   2. Log in with a Read token:  <vision-data>/envs/ltx25/bin/hf auth login
 #
 # Safe to re-run: `hf download` skips files that are already complete.
 set -euo pipefail
@@ -26,6 +28,8 @@ mkdir -p "$DEST"
 echo "== Main pack: Lightricks/LTX-2.5 =="
 "$HF" download Lightricks/LTX-2.5 \
   diffusion_models/ltx-2.5-22b-distilled-transformer-bf16.safetensors \
+  diffusion_models/ltx-2.5-22b-dev-transformer-bf16.safetensors \
+  loras/ltx-2.5-22b-distilled-lora-450-bf16.safetensors \
   text_encoders/gemma4-12b-with-proj-ltx-2.5-bf16.safetensors \
   vae/ltx-2.5-video-vae-bf16.safetensors \
   vae/ltx-2.5-video-vae-conv-bf16.safetensors \

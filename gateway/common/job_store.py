@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_at TEXT NOT NULL,
     started_at TEXT,
     finished_at TEXT,
-    downloaded_at TEXT
+    downloaded_at TEXT,
+    incognito INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS uploads (
@@ -80,6 +81,10 @@ def init_db() -> None:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
         if "downloaded_at" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN downloaded_at TEXT")
+        # Same for `incognito`; jobs created before it existed were kept in
+        # full, so 0 (not incognito) is the right value for them.
+        if "incognito" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN incognito INTEGER NOT NULL DEFAULT 0")
 
 
 # --- jobs --------------------------------------------------------------
@@ -91,12 +96,13 @@ def create_job(
     job_dir: Path,
     request: dict[str, Any],
     partition: str | None = None,
+    incognito: bool = False,
 ) -> None:
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO jobs (job_id, pipeline, status, job_dir, partition, request_json, created_at) "
-            "VALUES (?, ?, 'queued', ?, ?, ?, ?)",
-            (job_id, pipeline, str(job_dir), partition, json.dumps(request), _now()),
+            "INSERT INTO jobs (job_id, pipeline, status, job_dir, partition, request_json, created_at, incognito) "
+            "VALUES (?, ?, 'queued', ?, ?, ?, ?, ?)",
+            (job_id, pipeline, str(job_dir), partition, json.dumps(request), _now(), 1 if incognito else 0),
         )
 
 
@@ -211,12 +217,13 @@ def scrub_job(job_id: str, *, error: str | None = None, downloaded: bool = False
         )
 
 
-def list_finished_unscrubbed() -> list[sqlite3.Row]:
-    """Finished (succeeded or failed) jobs that still hold their request body
-    and possibly files -- what retention.sweep re-checks."""
+def list_finished_unscrubbed_incognito() -> list[sqlite3.Row]:
+    """Finished (succeeded or failed) incognito jobs that still hold their
+    request body and possibly files -- what retention.sweep re-checks. Jobs
+    that are not incognito are never scrubbed, so they are not listed."""
     with _connect() as conn:
         return conn.execute(
-            "SELECT * FROM jobs WHERE finished_at IS NOT NULL AND request_json != ?",
+            "SELECT * FROM jobs WHERE incognito = 1 AND finished_at IS NOT NULL AND request_json != ?",
             (SCRUBBED_REQUEST_JSON,),
         ).fetchall()
 
