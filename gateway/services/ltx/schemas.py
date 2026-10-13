@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from common.schemas import IncognitoOptionMixin, PartitionOptionMixin
 from services.ltx import config
+from services.tbdub.schemas import LIP_SYNC_FIELD_DESCRIPTION, apply_lip_sync_shape
 
 
 class ImageConditioning(BaseModel):
@@ -252,6 +253,12 @@ class AudioToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOption
     images: list[ImageConditioning] = Field(
         default_factory=list, description="Optional additional image conditioning (e.g. to pin the speaker's appearance to a reference photo)."
     )
+    lip_sync: bool = Field(False, description=LIP_SYNC_FIELD_DESCRIPTION, examples=[False])
+
+    @model_validator(mode="after")
+    def _apply_lip_sync(self):
+        apply_lip_sync_shape(self)
+        return self
 
 
 class RetakeRequest(PartitionOptionMixin, IncognitoOptionMixin):

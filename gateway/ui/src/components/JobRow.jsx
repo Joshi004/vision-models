@@ -29,6 +29,10 @@ const STATUS_TONE = {
 // form actually exists (see App.jsx); `onRetry(job)` is only ever called
 // once that's already true.
 //
+// `onRetryLipSync(job)` is optional too: offered, on a succeeded job whose
+// lip sync did not apply (job.lip_sync.applied === false, so the result is the
+// video WITHOUT lip sync), as a one-click way to redo only the sync.
+//
 // `highlighted` (set briefly by JobsPanel for a job it just saw appear)
 // adds a short-lived accent ring so a just-submitted job is easy to spot
 // in the list without having to scan for it.
@@ -43,6 +47,7 @@ export default function JobRow({
   onDelete,
   onRetry,
   canRetry,
+  onRetryLipSync,
   highlighted,
 }) {
   // 'copied' | 'failed' | null -- transient feedback for the Copy JSON
@@ -74,6 +79,7 @@ export default function JobRow({
   }
 
   const finished = !ACTIVE_STATUSES.has(job.status);
+  const lipSyncFailed = job.status === 'succeeded' && job.lip_sync?.applied === false;
   const showRetry = Boolean(onRetry) && finished && (canRetry ? canRetry(job) : true);
 
   return (
@@ -86,6 +92,8 @@ export default function JobRow({
         <Badge tone={STATUS_TONE[job.status] ?? 'neutral'}>{job.status}</Badge>
         {isCached && <Badge tone="accent">Cached</Badge>}
         {job.incognito && <Badge tone="warning">Incognito</Badge>}
+        {job.status === 'succeeded' && job.lip_sync?.applied === true && <Badge tone="success">Lip-synced</Badge>}
+        {job.status === 'succeeded' && job.lip_sync?.applied === false && <Badge tone="warning">No lip sync</Badge>}
         <span className="text-text">{job.pipeline}</span>
         <JobTimingSummary job={job} now={now} />
         <span className="font-mono text-xs text-muted">{job.job_id.slice(0, 8)}</span>
@@ -100,6 +108,23 @@ export default function JobRow({
           {job.slurm_job_id && <p className="text-xs text-muted">slurm_job_id: {job.slurm_job_id}</p>}
           <JobTimingDetail job={job} now={now} />
           {job.error && <p className="text-sm text-danger">{job.error}</p>}
+          {lipSyncFailed && (
+            <div className="flex flex-col gap-2 rounded-md border border-warning/60 bg-bg p-3">
+              <p className="text-sm text-warning">
+                Lip sync did not apply: the result is the video <strong>without</strong> lip sync.
+              </p>
+              {job.lip_sync.error && (
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words text-xs text-muted">{job.lip_sync.error}</pre>
+              )}
+              {onRetryLipSync && !job.incognito && (
+                <div>
+                  <Button type="button" variant="secondary" size="sm" onClick={() => onRetryLipSync(job)}>
+                    Retry lip sync only
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center gap-2">
             {ACTIVE_STATUSES.has(job.status) && (

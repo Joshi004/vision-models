@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     started_at TEXT,
     finished_at TEXT,
     downloaded_at TEXT,
-    incognito INTEGER NOT NULL DEFAULT 0
+    incognito INTEGER NOT NULL DEFAULT 0,
+    lip_sync_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS uploads (
@@ -85,6 +86,10 @@ def init_db() -> None:
         # full, so 0 (not incognito) is the right value for them.
         if "incognito" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN incognito INTEGER NOT NULL DEFAULT 0")
+        # Same for `lip_sync_json` (the outcome of the optional lip-sync step,
+        # see run_pipeline_job.py); NULL for every job that did not ask for it.
+        if "lip_sync_json" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN lip_sync_json TEXT")
 
 
 # --- jobs --------------------------------------------------------------
@@ -120,12 +125,14 @@ def mark_running(job_id: str) -> None:
         )
 
 
-def mark_succeeded(job_id: str, output_path: Path) -> None:
+def mark_succeeded(job_id: str, output_path: Path, lip_sync: dict[str, Any] | None = None) -> None:
+    """`lip_sync` is the outcome of the optional lip-sync step ({"requested",
+    "applied", "error"}) for a job that asked for it, else None."""
     with _connect() as conn:
         conn.execute(
-            "UPDATE jobs SET status = 'succeeded', output_path = ?, error = NULL, finished_at = ? "
-            "WHERE job_id = ? AND status != 'succeeded'",
-            (str(output_path), _now(), job_id),
+            "UPDATE jobs SET status = 'succeeded', output_path = ?, error = NULL, finished_at = ?, "
+            "lip_sync_json = ? WHERE job_id = ? AND status != 'succeeded'",
+            (str(output_path), _now(), json.dumps(lip_sync) if lip_sync is not None else None, job_id),
         )
 
 

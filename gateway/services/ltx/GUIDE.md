@@ -83,7 +83,7 @@ with the API process itself, not with generation.
 |---|---|---|---|
 | `POST /v1/ltx/videos/generate` | video (MP4) | fast **or** quality, your choice | `prompt`, optional `images` |
 | `POST /v1/ltx/videos/keyframe-interpolation` | video (MP4) | quality only | `prompt`, `keyframes` (>=2) |
-| `POST /v1/ltx/videos/audio-to-video` | video (MP4) | quality only | `prompt`, `audio_asset_id` |
+| `POST /v1/ltx/videos/audio-to-video` | video (MP4) | quality only | `prompt`, `audio_asset_id`, optional `lip_sync` (see the TBDub lip sync section) |
 | `POST /v1/ltx/videos/retake` | video (MP4) | fast only | `video_asset_id`, `prompt`, `start_time`, `end_time` |
 | `POST /v1/ltx/audio/generate` | audio (WAV) | (dev checkpoint, no fast variant) | `prompt` |
 
@@ -210,6 +210,10 @@ model generates one continuous shot, and asking for cuts produces unreliable res
 - **Audio-to-video**: describe the visible speaker/scene that should match the given audio (who's
   speaking, their appearance, the setting) -- not the audio's own content, which is fixed and
   passed through unchanged.
+  With `lip_sync: true` (a dedicated lip-sync model redraws the mouth to the audio afterwards), also
+  describe what the speaker's face and body should do besides talking -- raised eyebrows, a smile, a
+  laugh, nods: lip sync only redraws the mouth, jaw and the skin around them, so those reactions have
+  to come from this prompt.
 - **Retake**: describe only the content of the replaced `[start_time, end_time]` window, written as
   if it were the whole prompt for a short standalone clip -- not the surrounding video that's
   preserved as-is.

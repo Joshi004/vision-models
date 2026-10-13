@@ -21,6 +21,7 @@ per config.JOB_RETENTION_DAYS.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 import sqlite3
@@ -91,15 +92,40 @@ def _read_error(job_dir: Path) -> str:
     return "Job failed (no further detail was recorded)."
 
 
+def _read_lip_sync(job_dir: Path) -> dict | None:
+    """The outcome of the optional lip-sync step, written by
+    run_pipeline_job.py before it renames the output into place."""
+    try:
+        return json.loads((job_dir / "lip_sync.json").read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _lip_sync_requested(row: sqlite3.Row) -> bool:
+    try:
+        return json.loads(row["request_json"]).get("lip_sync") is True
+    except ValueError:
+        return False
+
+
 def _check_one(row: sqlite3.Row) -> None:
     job_id = row["job_id"]
     job_dir = Path(row["job_dir"])
 
     expected_output = _expected_output_path(job_dir)
     if expected_output is not None and expected_output.exists():
-        job_store.mark_succeeded(job_id, expected_output)
+        lip_sync = _read_lip_sync(job_dir)
+        if lip_sync is None and _lip_sync_requested(row):
+            # lip_sync.json is written before the output is renamed into place,
+            # so it can only be missing here because of the shared-filesystem
+            # visibility lag described above. Give it the same grace period.
+            first_seen = _pending_since.setdefault(f"lip_sync:{job_id}", time.monotonic())
+            if time.monotonic() - first_seen < _OUTPUT_VISIBILITY_GRACE_SECONDS:
+                return
+        job_store.mark_succeeded(job_id, expected_output, lip_sync)
         retention.on_job_succeeded(job_id)
         _pending_since.pop(job_id, None)
+        _pending_since.pop(f"lip_sync:{job_id}", None)
         return
 
     if (job_dir / ".failed").exists():

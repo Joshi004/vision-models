@@ -94,6 +94,20 @@ to stereo first) and muxed into the output unchanged; only the video is generate
 
 Setting `audio_max_duration` together with `duration_seconds` or `num_frames` is rejected (422).
 
+**Optional lip sync (`lip_sync: true`).** This pipeline follows the audio only loosely, so the speaker's
+mouth does not always move properly. With `lip_sync: true`, after the video is generated a dedicated
+lip-sync model (TBDub) redraws the mouth to match your audio exactly -- in the same job, on the same GPU,
+with no second upload or request. Choose the LTX version first (this endpoint or its sibling); lip sync is
+applied on top of it. What to know:
+- `frame_rate` is forced to 25 (the rate the lip-sync model works at); an explicit `num_frames` is turned
+  into the same duration and re-rounded at 25 fps. The stored request shows the values actually used.
+- It adds several minutes to the job. If lip sync fails (e.g. no face could be tracked) the job still
+  **succeeds** and returns the video **without** lip sync: check `lip_sync.applied` and `lip_sync.error` on
+  the job, then retry only the sync with `POST /v1/tbdub/videos/lip-sync` and this job's id as
+  `source_job_id`. The un-synced video stays in the job until it is deleted.
+- Only the mouth, jaw and the skin around them are redrawn: eyebrows, laughter, nods and other reactions
+  must be described in `prompt`. One speaker with a visible face is expected.
+
 Output: MP4, H.264 video + the original audio muxed in unchanged.
 """
 
@@ -230,6 +244,19 @@ AUDIO_TO_VIDEO_EXAMPLES = {
             "audio_asset_id": "<asset_id of the audio file>",
             "orientation": "landscape",
             "duration_seconds": 5,
+        },
+    },
+    "with_lip_sync": {
+        "summary": "Match the audio, with the mouth re-drawn to match it exactly (TBDub)",
+        "value": {
+            "prompt": (
+                "A woman in a green sweater stands in a sunlit kitchen, talking warmly to the "
+                "camera, steady medium close-up; she laughs softly at the end."
+            ),
+            "audio_asset_id": "<asset_id of the audio file>",
+            "audio_max_duration": 12.0,
+            "orientation": "landscape",
+            "lip_sync": True,
         },
     },
     "match_audio": {

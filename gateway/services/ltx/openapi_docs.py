@@ -64,6 +64,20 @@ muxed into the output unchanged; only the video is generated to match it. Use
 file -- by default, audio covering the full requested video duration is read
 starting at 0s.
 
+**Optional lip sync (`lip_sync: true`).** This pipeline follows the audio only loosely, so the speaker's
+mouth does not always move properly. With `lip_sync: true`, after the video is generated a dedicated
+lip-sync model (TBDub) redraws the mouth to match your audio exactly -- in the same job, on the same GPU,
+with no second upload or request. Choose the LTX version first (this endpoint or its sibling); lip sync is
+applied on top of it. What to know:
+- `frame_rate` is forced to 25 (the rate the lip-sync model works at); an explicit `num_frames` is turned
+  into the same duration and re-rounded at 25 fps. The stored request shows the values actually used.
+- It adds several minutes to the job. If lip sync fails (e.g. no face could be tracked) the job still
+  **succeeds** and returns the video **without** lip sync: check `lip_sync.applied` and `lip_sync.error` on
+  the job, then retry only the sync with `POST /v1/tbdub/videos/lip-sync` and this job's id as
+  `source_job_id`. The un-synced video stays in the job until it is deleted.
+- Only the mouth, jaw and the skin around them are redrawn: eyebrows, laughter, nods and other reactions
+  must be described in `prompt`. One speaker with a visible face is expected.
+
 Output: MP4, H.264 video + the original audio muxed in unchanged.
 """
 
@@ -188,6 +202,19 @@ AUDIO_TO_VIDEO_EXAMPLES = {
             "duration_seconds": 5,
             "audio_asset_id": "<asset_id from POST /v1/uploads>",
             "audio_start_time": 0,
+        },
+    },
+    "with_lip_sync": {
+        "summary": "Same, with the mouth re-drawn to match the audio exactly (TBDub)",
+        "value": {
+            "prompt": (
+                "A man in a blue collared shirt sits at a desk, speaking directly to the camera "
+                "with natural hand gestures, soft office lighting behind him."
+            ),
+            "orientation": "landscape",
+            "duration_seconds": 5,
+            "audio_asset_id": "<asset_id from POST /v1/uploads>",
+            "lip_sync": True,
         },
     },
 }

@@ -21,7 +21,7 @@ import JobRow from './JobRow.jsx';
 // time it's seen at all (e.g. one just submitted from this tab). Both are
 // skipped on the very first load (seenRef starts at `null`), so opening
 // the app never floods either for jobs that were already sitting there.
-export default function JobsPanel({ refreshSignal, onRetry, canRetry }) {
+export default function JobsPanel({ refreshSignal, onRetry, canRetry, onRetryLipSync }) {
   const { jobs, loaded, error, setError, now, refresh } = useJobList(50, refreshSignal);
   const [expandedId, setExpandedId] = useState(null);
   const [cancellingId, setCancellingId] = useState(null);
@@ -142,6 +142,7 @@ export default function JobsPanel({ refreshSignal, onRetry, canRetry }) {
             onDelete={() => handleDelete(job)}
             onRetry={onRetry}
             canRetry={canRetry}
+            onRetryLipSync={onRetryLipSync}
             highlighted={highlightedId === job.job_id}
           />
         ))}

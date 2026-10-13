@@ -39,7 +39,7 @@ a first and a last frame (and, unlike 2.3's, has a fast mode). Audio-to-video wo
 |---|---|---|---|
 | `POST /v1/ltx25/videos/generate` | video (MP4) | fast **or** quality (DFR), your choice | `prompt`, optional `images` |
 | `POST /v1/ltx25/videos/interpolate` | video (MP4) | fast **or** quality (DFR), your choice | `first_frame_asset_id`, `last_frame_asset_id`, `prompt` |
-| `POST /v1/ltx25/videos/audio-to-video` | video (MP4) | guided two-stage only (dev transformer + distilled LoRA) | `audio_asset_id`, `prompt`, optional `images`, `audio_max_duration` |
+| `POST /v1/ltx25/videos/audio-to-video` | video (MP4) | guided two-stage only (dev transformer + distilled LoRA) | `audio_asset_id`, `prompt`, optional `images`, `audio_max_duration`, `lip_sync` (see the TBDub lip sync section) |
 | `POST /v1/ltx25/videos/retake` | video (MP4) | distilled only | `video_asset_id`, `prompt`, `start_time`, `end_time` |
 
 MP4 outputs are H.264 video + AAC audio, muxed together. Video and audio are generated jointly:
@@ -145,6 +145,10 @@ multi-shot prompt instead.
 speaking, their appearance, the setting, the camera. The audio is not regenerated, so there is no
 need to quote its words. To pin the speaker's look, attach a reference photo in `images` at
 `frame_idx: 0`. `negative_prompt` is honored on this endpoint only.
+With `lip_sync: true` (a dedicated lip-sync model redraws the mouth to the audio afterwards), also
+describe what the speaker's face and body should do besides talking -- raised eyebrows, a smile, a
+laugh, nods: lip sync only redraws the mouth, jaw and the skin around them, so those reactions have to
+come from this prompt.
 
 **Retake**: describe only the content of the replaced `[start_time, end_time]` window, as if it
 were the whole prompt for a short standalone clip.

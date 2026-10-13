@@ -3,7 +3,7 @@ model-serving backends on this node.
 
 Backend-agnostic pieces (job tracking, uploads, Slurm polling,
 partition selection) live in common/. Each backend (LTX-2.3, LTX-2.5,
-Wan-Animate v1, RVC, Parakeet, Breeze TTS 2 and Qwen-Image-2.1 today; more may be added later) owns its
+Wan-Animate v1, RVC, Parakeet, Breeze TTS 2, Qwen-Image-2.1 and TBDub today; more may be added later) owns its
 own request schemas and Slurm dispatch logic under services/<name>/,
 mounted here under its own path prefix.
 
@@ -45,6 +45,7 @@ from common.schemas import (
     JobListItem,
     JobListResponse,
     JobStatusResponse,
+    LipSyncResult,
     PartitionStatus,
     PartitionStatusResponse,
     PurgeResponse,
@@ -64,6 +65,8 @@ from services.qwen_image21 import config as qwen_image21_config
 from services.qwen_image21.router import router as qwen_image21_router
 from services.rvc import config as rvc_config
 from services.rvc.router import router as rvc_router
+from services.tbdub import config as tbdub_config
+from services.tbdub.router import router as tbdub_router
 from services.wan_animate import config as wan_animate_config
 from services.wan_animate import progress as wan_animate_progress
 from services.wan_animate.router import router as wan_animate_router
@@ -92,7 +95,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="GPU Cluster Model-Serving API",
-    version="0.11.0",
+    version="0.12.0",
     description=openapi_docs.APP_DESCRIPTION,
     openapi_tags=openapi_docs.TAGS_METADATA,
     lifespan=lifespan,
@@ -108,6 +111,7 @@ app.include_router(rvc_router, prefix="/v1/rvc")
 app.include_router(parakeet_router, prefix="/v1/parakeet")
 app.include_router(breeze_tts_router, prefix="/v1/breeze-tts")
 app.include_router(qwen_image21_router, prefix="/v1/qwen-image21")
+app.include_router(tbdub_router, prefix="/v1/tbdub")
 
 # Registered backends, for GET /v1/guide (common/guide.py) -- each entry is
 # a small, enumerable set of facts: display name, path prefix, and where
@@ -124,6 +128,7 @@ _BACKENDS: list[guide.BackendInfo] = [
     guide.BackendInfo(id="parakeet", name="Parakeet transcription", prefix="/v1/parakeet", guide_file="parakeet/GUIDE.md"),
     guide.BackendInfo(id="breeze-tts", name="Breeze TTS 2 text-to-speech", prefix="/v1/breeze-tts", guide_file="breeze_tts/GUIDE.md"),
     guide.BackendInfo(id="qwen-image21", name="Qwen-Image-2.1 image generation", prefix="/v1/qwen-image21", guide_file="qwen_image21/GUIDE.md"),
+    guide.BackendInfo(id="tbdub", name="TBDub lip sync", prefix="/v1/tbdub", guide_file="tbdub/GUIDE.md"),
 ]
 
 
@@ -236,6 +241,7 @@ _TYPICAL_FALLBACK_SECONDS: dict[str, float] = {
     "parakeet": parakeet_config.TYPICAL_RUN_SECONDS,
     "breeze-tts": breeze_tts_config.TYPICAL_RUN_SECONDS,
     "qwen-image21": qwen_image21_config.TYPICAL_RUN_SECONDS,
+    "tbdub": tbdub_config.TYPICAL_RUN_SECONDS,
 }
 
 # Same idea, but for live progress readers -- most backends have none
@@ -262,6 +268,18 @@ def _typical_run_seconds(pipeline: str, cache: dict[str, tuple[float | None, str
             fallback = _TYPICAL_FALLBACK_SECONDS.get(pipeline.split(":", 1)[0])
             cache[pipeline] = (fallback, "documented estimate" if fallback is not None else None)
     return cache[pipeline]
+
+
+def _lip_sync_result(row: sqlite3.Row) -> LipSyncResult | None:
+    """Outcome of the optional lip-sync step, or None if the job never asked
+    for one. Once the job finished, the outcome was stored with it; before
+    that (or if the job failed first) lip sync was requested but did not
+    happen, which only the stored request body still tells."""
+    if row["lip_sync_json"]:
+        return LipSyncResult(**json.loads(row["lip_sync_json"]))
+    if json.loads(row["request_json"]).get("lip_sync") is True:
+        return LipSyncResult(applied=False if row["status"] == "failed" else None)
+    return None
 
 
 def _row_to_status(row: sqlite3.Row, typical_cache: dict[str, tuple[float | None, str | None]]) -> JobStatusResponse:
@@ -291,6 +309,7 @@ def _row_to_status(row: sqlite3.Row, typical_cache: dict[str, tuple[float | None
         typical_run_seconds=typical_run_seconds,
         typical_basis=typical_basis,
         progress=progress,
+        lip_sync=_lip_sync_result(row),
     )
 
 

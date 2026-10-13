@@ -190,6 +190,31 @@ class JobProgress(BaseModel):
     )
 
 
+class LipSyncResult(BaseModel):
+    """What happened to the optional lip-sync step of an LTX audio-to-video
+    job submitted with `lip_sync: true`."""
+
+    requested: bool = Field(True, description="Always true when this object is present.")
+    applied: bool | None = Field(
+        None,
+        description=(
+            "true: the result is lip-synced. false: lip sync did not happen and the result is the video "
+            "WITHOUT lip sync (see `error`; if the job itself failed there is no result at all). "
+            "null: not known yet, the job is still queued or running."
+        ),
+        examples=[True],
+    )
+    error: str | None = Field(
+        None,
+        description=(
+            "Why lip sync was not applied (only when `applied` is false), with the end of the lip-sync log. "
+            "The job still reports status 'succeeded' in that case. To retry only the sync without "
+            "regenerating the video, call POST /v1/tbdub/videos/lip-sync with this job's id as `source_job_id`."
+        ),
+        examples=[None],
+    )
+
+
 class JobStatusResponse(BaseModel):
     """Response from GET /v1/jobs/{job_id}."""
 
@@ -214,6 +239,7 @@ class JobStatusResponse(BaseModel):
             "breeze-tts:synthesize",
             "qwen-image21:generate",
             "qwen-image21:edit",
+            "tbdub:lip-sync",
         ],
     )
     status: Literal["queued", "running", "succeeded", "failed"] = Field(
@@ -296,8 +322,17 @@ class JobStatusResponse(BaseModel):
         description=(
             "Live progress while status='running', for the subset of backends that report it (see "
             "GET /v1/guide for which). Null for every other backend's pipelines, and for "
-            "queued/finished jobs either way -- rely on typical_run_seconds and the elapsed time "
-            "instead when this is null."
+            "queued/finished jobs either way -- rely on typical_run_seconds and the elapsed "
+            "time instead when this is null."
+        ),
+    )
+    lip_sync: LipSyncResult | None = Field(
+        None,
+        description=(
+            "Only for an audio-to-video job submitted with `lip_sync: true` (null for every other job, "
+            "including the standalone lip-sync endpoint, whose failure is an ordinary failed job). "
+            "Check `lip_sync.applied` on a succeeded job: if it is false, the downloaded video has no "
+            "lip sync and `lip_sync.error` says why."
         ),
     )
 

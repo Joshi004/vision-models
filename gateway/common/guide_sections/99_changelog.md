@@ -4,6 +4,16 @@ Dates are when a change shipped on this codebase, not necessarily when you're re
 `api_version` field (`GET /v1/guide?format=json`) is this server's own current version; compare it
 against what you last integrated against.
 
+- **0.12.0** (2026-10-12): Added an eighth backend, TBDub lip sync, in two forms. (1) `POST /v1/ltx/videos/audio-to-video`
+  and `POST /v1/ltx25/videos/audio-to-video` accept a new optional boolean `lip_sync` (default `false`): after the
+  video is generated, a dedicated lip-sync model redraws the mouth to match the audio exactly, in the same job.
+  It forces `frame_rate` to 25 (an explicit `num_frames` is converted to the same duration) and adds several
+  minutes. If lip sync fails the job still reports `succeeded` and returns the video **without** lip sync.
+  (2) `POST /v1/tbdub/videos/lip-sync` lip-syncs an uploaded video and audio, or re-syncs a succeeded LTX
+  audio-to-video job (`source_job_id`) without regenerating it; it is always its own job (`pipeline`
+  `tbdub:lip-sync`). New field on every job status: `lip_sync` (`requested`, `applied`, `error`), `null` for jobs that
+  did not ask for lip sync -- **check `lip_sync.applied` on a succeeded job that did**. Declared the `Lip sync` tag.
+  No existing field or endpoint changed behavior unless `lip_sync: true` is sent.
 - **0.11.0** (2026-10-11): **Behavior change: job data is now kept by default, and opting out is per
   request.** Every generation request on every backend accepts a new optional boolean `incognito`
   (default `false`). A normal job keeps everything -- prompt/settings, uploaded inputs, logs and output --

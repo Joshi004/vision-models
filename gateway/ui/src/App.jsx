@@ -17,6 +17,7 @@ import RvcConvertForm from './forms/RvcConvertForm.jsx';
 import RvcBatchForm from './forms/RvcBatchForm.jsx';
 import TranscribeForm from './forms/TranscribeForm.jsx';
 import BreezeTtsForm from './forms/BreezeTtsForm.jsx';
+import LipSyncForm from './forms/LipSyncForm.jsx';
 import { QwenImageGenerateForm, QwenImageEditForm } from './forms/QwenImageForm.jsx';
 import { getHealth, getOpenApi } from './api.js';
 import { extractSchemas, SchemaContext } from './schema.js';
@@ -30,6 +31,7 @@ const GROUPS = [
   { id: 'ltx', label: 'LTX-2.3' },
   { id: 'ltx25', label: 'LTX-2.5' },
   { id: 'wan', label: 'Wan-Animate' },
+  { id: 'lipsync', label: 'Lip Sync' },
   { id: 'rvc', label: 'Voice Conversion' },
   { id: 'parakeet', label: 'Transcription' },
   { id: 'breeze', label: 'Text to Speech' },
@@ -145,6 +147,15 @@ const RECIPES = [
     icon: SwapUserIcon,
     Component: WanReplaceForm,
     pipeline: 'wan-animate:replace',
+  },
+  {
+    id: 'tbdub-lip-sync',
+    label: 'Lip sync video',
+    description: "Redraw a speaker's mouth in an existing video to match an audio track exactly (TBDub).",
+    group: 'lipsync',
+    icon: WaveIcon,
+    Component: LipSyncForm,
+    pipeline: 'tbdub:lip-sync',
   },
   {
     id: 'rvc-convert',
@@ -361,6 +372,22 @@ export default function App() {
     mainRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
+  // "Retry lip sync" on a job row whose lip sync did not apply: opens the
+  // standalone lip-sync form with that job as the source (its video and audio
+  // are reused server-side, nothing to upload). A stand-in job object is
+  // enough -- the form only reads `request` and shows the "prefilled from job"
+  // banner from the job id and status.
+  function handleRetryLipSync(job) {
+    const recipe = RECIPES.find((r) => r.pipeline === 'tbdub:lip-sync');
+    if (!recipe) return;
+    setActiveId(recipe.id);
+    setPrefill({
+      job: { ...job, pipeline: recipe.pipeline, request: { source_job_id: job.job_id } },
+      nonce: Date.now(),
+    });
+    mainRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
   function selectRecipe(recipe) {
     setActiveId(recipe.id);
     // Switching recipe by hand abandons any pending retry -- otherwise a
@@ -392,7 +419,12 @@ export default function App() {
             <main ref={mainRef} className="flex-1 overflow-y-auto">
               {showingHistory ? (
                 <div className="px-5 py-6 lg:px-10">
-                  <JobHistory jobRetentionDays={health?.job_retention_days} onRetry={handleRetry} canRetry={canRetry} />
+                  <JobHistory
+                    jobRetentionDays={health?.job_retention_days}
+                    onRetry={handleRetry}
+                    canRetry={canRetry}
+                    onRetryLipSync={handleRetryLipSync}
+                  />
                 </div>
               ) : (
                 <div className="flex flex-col gap-6 px-5 py-6 lg:flex-row lg:gap-10 lg:px-10">
@@ -415,7 +447,12 @@ export default function App() {
                     />
                   </div>
                   <aside className="w-full shrink-0 lg:w-80">
-                    <JobsPanel refreshSignal={refreshSignal} onRetry={handleRetry} canRetry={canRetry} />
+                    <JobsPanel
+                      refreshSignal={refreshSignal}
+                      onRetry={handleRetry}
+                      canRetry={canRetry}
+                      onRetryLipSync={handleRetryLipSync}
+                    />
                   </aside>
                 </div>
               )}

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -50,6 +51,8 @@ import imageio_ffmpeg
 TBDUB_FPS = 25
 SAMPLE_NAME = "lipsync"  # TBDub names its output "<sample name>_tbdub.mp4"
 STDERR_TAIL_CHARS = 2000
+# The last line of a Python traceback, e.g. "RuntimeError: MediaPipe detected no face in the video."
+_EXCEPTION_LINE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception)\b")
 
 
 class LipSyncError(RuntimeError):
@@ -158,10 +161,19 @@ def run_tbdub(
         argv += ["--ref-cfg-scale", str(args.ref_cfg_scale)]
 
     print("Running TBDub:", " ".join(argv), flush=True)
-    # stdout/stderr go straight to this process's log; the caller keeps it.
-    proc = subprocess.run(argv, env=env, cwd=str(tbdub_repo))
-    if proc.returncode != 0:
-        raise LipSyncError(f"TBDub inference exited with code {proc.returncode} (see the log above).")
+    # TBDub's output is passed through to this process's log (the caller keeps it) and also
+    # scanned: with chained tracebacks the cause is in the middle of the log, not at its end.
+    proc = subprocess.Popen(
+        argv, env=env, cwd=str(tbdub_repo), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
+    )
+    cause = ""
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+        if not cause and _EXCEPTION_LINE.match(line):
+            cause = line.strip()[:300]  # the first one printed is the root cause
+    returncode = proc.wait()
+    if returncode != 0:
+        raise LipSyncError(f"TBDub failed (exit {returncode}): {cause or 'see the log above'}")
     result = out_dir / f"{SAMPLE_NAME}_tbdub.mp4"
     if not result.is_file():
         raise LipSyncError(f"TBDub finished but did not write {result}.")

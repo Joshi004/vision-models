@@ -25,7 +25,7 @@ const STATUS_OPTIONS = [
 //
 // `onRetry`/`canRetry` come from App.jsx unchanged -- see JobRow.jsx for
 // what each does; this component has no retry logic of its own.
-export default function JobHistory({ jobRetentionDays, onRetry, canRetry }) {
+export default function JobHistory({ jobRetentionDays, onRetry, canRetry, onRetryLipSync }) {
   const { jobs, loaded, error, setError, now, refresh } = useJobList(500);
   const [expandedId, setExpandedId] = useState(null);
   const [cancellingId, setCancellingId] = useState(null);
@@ -163,6 +163,7 @@ export default function JobHistory({ jobRetentionDays, onRetry, canRetry }) {
             onDelete={() => handleDelete(job)}
             onRetry={onRetry}
             canRetry={canRetry}
+            onRetryLipSync={onRetryLipSync}
           />
         ))}
       </ul>

@@ -30,6 +30,7 @@ from pydantic import Field, model_validator
 
 from common.schemas import IncognitoOptionMixin, PartitionOptionMixin
 from services.ltx.schemas import ImageConditioning, RetakeRequest, VideoShapeMixin
+from services.tbdub.schemas import LIP_SYNC_FIELD_DESCRIPTION, apply_lip_sync_shape
 
 
 class Ltx25TextToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin):
@@ -231,11 +232,19 @@ class Ltx25AudioToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoO
         default_factory=list,
         description="Optional image conditioning (e.g. to pin the speaker's appearance to a reference photo at frame 0).",
     )
+    lip_sync: bool = Field(False, description=LIP_SYNC_FIELD_DESCRIPTION, examples=[False])
 
     @model_validator(mode="after")
     def _check_audio_length(self):
         if self.audio_max_duration is not None and (self.duration_seconds is not None or self.num_frames is not None):
             raise ValueError("'audio_max_duration' cannot be combined with 'duration_seconds' or 'num_frames'.")
+        return self
+
+    @model_validator(mode="after")
+    def _apply_lip_sync(self):
+        # Runs after _check_audio_length (validators run in definition order),
+        # so a conflicting audio_max_duration + num_frames is rejected first.
+        apply_lip_sync_shape(self)
         return self
 
 

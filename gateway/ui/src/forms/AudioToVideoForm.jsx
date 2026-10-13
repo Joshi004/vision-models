@@ -18,6 +18,7 @@ import Section from '../components/ui/Section.jsx';
 import CollapsibleSection from '../components/ui/CollapsibleSection.jsx';
 import Textarea from '../components/ui/Textarea.jsx';
 import Input from '../components/ui/Input.jsx';
+import Switch from '../components/ui/Switch.jsx';
 import AssetUpload from '../components/AssetUpload.jsx';
 import FieldLabel from '../components/FieldLabel.jsx';
 import SeedField from '../components/SeedField.jsx';
@@ -40,11 +41,12 @@ const DEFAULTS = {
   audioStartTime: 0,
   audioMaxDuration: '',
   images: [],
+  lipSync: false,
   shape: defaultShape(),
   partition: '',
 };
 
-const REMEMBER_KEYS = ['seed', 'shape', 'partition'];
+const REMEMBER_KEYS = ['seed', 'lipSync', 'shape', 'partition'];
 
 function fromRequest(initialRequest, matchAudioLength) {
   if (!initialRequest) return null;
@@ -60,6 +62,7 @@ function fromRequest(initialRequest, matchAudioLength) {
     audioStartTime: initialRequest.audio_start_time ?? 0,
     audioMaxDuration: initialRequest.audio_max_duration ?? '',
     images: imageEntriesFromRequest(initialRequest.images),
+    lipSync: initialRequest.lip_sync ?? false,
     shape,
     partition: initialRequest.partition ?? '',
   };
@@ -99,7 +102,7 @@ export default function AudioToVideoForm({
   const schemas = useSchemas();
   const { submit, submitting, error, lastJobId } = useSubmitJob(onSubmitted);
 
-  const { prompt, negativePrompt, seed, audioAsset, audioStartTime, audioMaxDuration, images, shape, partition } = values;
+  const { prompt, negativePrompt, seed, audioAsset, audioStartTime, audioMaxDuration, images, lipSync, shape, partition } = values;
 
   const payload = {
     prompt,
@@ -107,6 +110,7 @@ export default function AudioToVideoForm({
     audio_asset_id: audioAsset?.status === 'ready' ? audioAsset.assetId : undefined,
     audio_start_time: audioStartTime === '' ? undefined : Number(audioStartTime),
     images: toImageConditioningPayload(images),
+    lip_sync: lipSync,
     ...toShapePayload(shape),
   };
   const lengthFromAudio = matchAudioLength && shape.lengthMode === 'auto';
@@ -134,7 +138,7 @@ export default function AudioToVideoForm({
   return (
     <FormShell
       title={title}
-      description="The source audio is muxed into the output unchanged, not regenerated."
+      description="The source audio is muxed into the output unchanged, not regenerated. Tick Lip sync to also have the mouth redrawn to match it exactly."
       endpoint={`POST ${endpoint}`}
       prefillJob={prefillJob}
       onClearPrefill={onClearPrefill}
@@ -212,6 +216,21 @@ export default function AudioToVideoForm({
           allowAutoLength={matchAudioLength}
           autoLengthLabel="Match audio"
         />
+        <div className="flex flex-col gap-1">
+          <Switch
+            checked={lipSync}
+            onChange={(checked) => setField('lipSync', checked)}
+            label="Lip sync (re-draw the mouth to match the audio exactly, TBDub)"
+          />
+          {lipSync && (
+            <p className="text-xs text-muted">
+              Runs in the same job, right after the video is generated. Forces frame_rate to 25 (an exact frame count
+              is converted to the same duration) and adds several minutes. Only the mouth is redrawn, so describe any
+              other reaction (eyebrows, a laugh) in the prompt. If lip sync fails you still get the video without it,
+              flagged on the job, and can retry just the sync.
+            </p>
+          )}
+        </div>
       </Section>
 
       <CollapsibleSection title="Advanced" open={advancedOpen} onToggle={setAdvancedOpen}>

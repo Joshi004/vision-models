@@ -46,6 +46,10 @@ TAGS_METADATA = [
         "description": "Endpoints that produce audio only, no video. Grouped under each backend's own path prefix.",
     },
     {
+        "name": "Lip sync",
+        "description": "Redraw the speaker's mouth in an existing video to match an audio track exactly (TBDub). Also available as a `lip_sync` option on the LTX audio-to-video endpoints.",
+    },
+    {
         "name": "Voice conversion",
         "description": "Convert an existing recording to sound like one of a curated set of pre-installed voices, keeping its original delivery intact.",
     },

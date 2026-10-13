@@ -49,6 +49,9 @@
 #   QWEN_IMAGE21_BASE_DIR, QWEN_IMAGE21_TURBO_DIR     (default <data dir>/weights/qwen_image21/{base,turbo})
 #   QWEN_IMAGE21_MEM_PER_GPU, QWEN_IMAGE21_CPUS, QWEN_IMAGE21_JOB_TIME   (Qwen-Image-2.1 backend's own Slurm allocation shape)
 #   QWEN_IMAGE21_MAX_PROMPT_CHARS                     (default 8000)
+#   TBDUB_MEM_PER_GPU, TBDUB_CPUS, TBDUB_API_TIME     (TBDub lip-sync backend's own Slurm allocation shape; defaults 64G, 8, 02:00:00)
+#   TBDUB_LIPSYNC_EXTRA_SECONDS                       (default 1800: time added to an LTX audio-to-video job's limit when it asks for
+#                                                      lip sync, and the most the lip-sync step may then take before it is stopped)
 set -euo pipefail
 
 API_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

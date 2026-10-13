@@ -26,6 +26,8 @@ from services.ltx.schemas import (
     TextToAudioRequest,
     TextToVideoRequest,
 )
+from services.tbdub import config as tbdub_config
+from services.tbdub import dispatch as tbdub_dispatch
 
 
 class DispatchError(RuntimeError):
@@ -188,9 +190,18 @@ def build_text_to_audio_args(req: TextToAudioRequest, output_path: Path) -> list
 
 
 def _submit_slurm_job(
-    job_id: str, job_dir: Path, module_args: list[str], output_path: Path, partition: str, incognito: bool
+    job_id: str,
+    job_dir: Path,
+    module_args: list[str],
+    output_path: Path,
+    partition: str,
+    incognito: bool,
+    post_step: dict | None = None,
 ) -> str:
-    """Write args.json + submit via sbatch (non-blocking). Returns the Slurm job id."""
+    """Write args.json + submit via sbatch (non-blocking). Returns the Slurm job id.
+
+    `post_step` (lip sync, see services/tbdub/dispatch.py) is written next to args.json for
+    run_pipeline_job.py to run after the main step; the job's time limit is extended to cover it."""
     partial_path = job_dir / f"output.partial{output_path.suffix}"
     args = list(module_args)
     idx = args.index("--output-path")
@@ -199,6 +210,10 @@ def _submit_slurm_job(
     full_argv = [str(config.PIPELINE_PYTHON), *args]
     (job_dir / "args.json").write_text(json.dumps(full_argv))
     (job_dir / "output_path.txt").write_text(str(output_path))
+    time_limit = config.JOB_TIME_LIMIT
+    if post_step is not None:
+        (job_dir / "post_step.json").write_text(json.dumps(post_step))
+        time_limit = tbdub_config.extend_time_limit(time_limit, tbdub_config.LIPSYNC_EXTRA_SECONDS)
 
     job_name = f"ltx23-api-{job_id[:8]}"
     wrap_argv = ["python3", str(config.RUN_PIPELINE_JOB_SCRIPT), str(job_dir)]
@@ -210,7 +225,7 @@ def _submit_slurm_job(
         "--gres=gpu:1",
         f"--cpus-per-task={config.CPUS_PER_GPU}",
         f"--mem-per-gpu={config.MEM_PER_GPU}",
-        f"--time={config.JOB_TIME_LIMIT}",
+        f"--time={time_limit}",
         f"--job-name={common_config.SLURM_JOB_NAME_PREFIX}{job_name}",
         f"--output={retention.slurm_log_path(job_dir, incognito)}",
         f"--wrap={wrap_str}",
@@ -221,10 +236,13 @@ def _submit_slurm_job(
     return result.stdout.strip().split(";")[0]  # --parsable prints "<id>" or "<id>;<cluster>"
 
 
-def _dispatch(pipeline: str, req, output_suffix: str, build_args) -> str:
+def _dispatch(pipeline: str, req, output_suffix: str, build_args, build_post_step=None) -> str:
     """Shared submit path: validate capacity + assets, then create the job
     directory/DB row/Slurm job, in that order, so an invalid request never
-    leaves debris behind."""
+    leaves debris behind.
+
+    `build_post_step(req, job_dir)`, if given, returns the second step to run after the main
+    one (lip sync) or None -- see services/tbdub/dispatch.py."""
     _check_capacity()
     partition = resolve_partition(getattr(req, "partition", None))
     job_id = job_store.new_id()
@@ -234,11 +252,14 @@ def _dispatch(pipeline: str, req, output_suffix: str, build_args) -> str:
     # Raises KeyError/FileNotFoundError here (before anything is created on
     # disk or in the DB) if an asset_id is invalid.
     module_args = build_args(req, output_path)
+    post_step = build_post_step(req, job_dir) if build_post_step else None
 
     job_dir.mkdir(parents=True)
     job_store.create_job(job_id, pipeline, job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito)
     try:
-        slurm_job_id = _submit_slurm_job(job_id, job_dir, module_args, output_path, partition, req.incognito)
+        slurm_job_id = _submit_slurm_job(
+            job_id, job_dir, module_args, output_path, partition, req.incognito, post_step
+        )
     except DispatchError:
         job_store.mark_failed(job_id, "Could not submit the Slurm job.")
         raise
@@ -255,7 +276,9 @@ def dispatch_keyframe_interpolation(req: KeyframeInterpolationRequest) -> str:
 
 
 def dispatch_audio_to_video(req: AudioToVideoRequest) -> str:
-    return _dispatch("ltx:audio-to-video", req, ".mp4", build_audio_to_video_args)
+    return _dispatch(
+        "ltx:audio-to-video", req, ".mp4", build_audio_to_video_args, tbdub_dispatch.post_step_for_audio_to_video
+    )
 
 
 def dispatch_retake(req: RetakeRequest) -> str:
