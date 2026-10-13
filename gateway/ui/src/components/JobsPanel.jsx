@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
-import { cancelJob } from '../api.js';
-import { useAutoCacheResults } from '../autoCache.js';
+import { cancelJob, purgeJob } from '../api.js';
+import { forgetSubmittedJob, useAutoCacheResults } from '../autoCache.js';
+import { deleteCachedResult } from '../resultCache.js';
 import { ACTIVE_STATUSES, useJobList } from '../utils.js';
 import { useToast } from './ui/Toast.jsx';
 import JobRow from './JobRow.jsx';
@@ -8,10 +9,9 @@ import JobRow from './JobRow.jsx';
 // Backs GET /v1/jobs -- shows every job this server still has a row for
 // (any backend, including ones submitted by curl or an agent, not just
 // from this browser tab), polling while any of them are still queued or
-// running. Deliberately small (last 50, Cancel and Retry only, no Delete)
-// since it's shown beside every form, not just its own page -- see
-// components/JobHistory.jsx for the fuller, filterable view with
-// permanent delete.
+// running. Deliberately small (last 50; Cancel, Retry and permanent Delete
+// per job) since it's shown beside every form, not just its own page -- see
+// components/JobHistory.jsx for the fuller, filterable view.
 //
 // `onRetry`/`canRetry` come from App.jsx unchanged -- see JobRow.jsx for
 // what each does; this component has no retry logic of its own.
@@ -25,6 +25,7 @@ export default function JobsPanel({ refreshSignal, onRetry, canRetry }) {
   const { jobs, loaded, error, setError, now, refresh } = useJobList(50, refreshSignal);
   const [expandedId, setExpandedId] = useState(null);
   const [cancellingId, setCancellingId] = useState(null);
+  const [deletingId, setDeletingId] = useState(null);
   const [highlightedId, setHighlightedId] = useState(null);
   const [filter, setFilter] = useState('active');
   const { addToast } = useToast();
@@ -60,6 +61,36 @@ export default function JobsPanel({ refreshSignal, onRetry, canRetry }) {
       setError(err.message);
     } finally {
       setCancellingId(null);
+    }
+  }
+
+  // Same permanent delete as JobHistory.jsx's handleDelete, but reports its
+  // outcome as a toast instead of a banner: this panel is a small strip
+  // beside a form, not a page of its own.
+  async function handleDelete(job) {
+    const confirmed = window.confirm(
+      `Permanently delete job ${job.job_id} (${job.pipeline})?\n\n` +
+        'This removes its output, logs, and any intermediate files, plus any uploaded ' +
+        'input no other job still uses. This cannot be undone.',
+    );
+    if (!confirmed) return;
+    setDeletingId(job.job_id);
+    setError(null);
+    try {
+      const result = await purgeJob(job.job_id);
+      await deleteCachedResult(job.job_id);
+      forgetSubmittedJob(job.job_id);
+      const removedCount = result.removed_asset_ids.length;
+      const keptCount = result.kept_asset_ids.length;
+      const parts = [`Deleted job ${job.job_id.slice(0, 8)}\u2026.`];
+      if (removedCount > 0) parts.push(`Removed ${removedCount} uploaded input${removedCount === 1 ? '' : 's'}.`);
+      if (keptCount > 0) parts.push(`Kept ${keptCount} still used by another job.`);
+      addToast({ tone: 'success', message: parts.join(' ') });
+      await refresh();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -107,6 +138,8 @@ export default function JobsPanel({ refreshSignal, onRetry, canRetry }) {
             onToggleExpand={() => setExpandedId(expandedId === job.job_id ? null : job.job_id)}
             cancelling={cancellingId === job.job_id}
             onCancel={() => handleCancel(job.job_id)}
+            deleting={deletingId === job.job_id}
+            onDelete={() => handleDelete(job)}
             onRetry={onRetry}
             canRetry={canRetry}
             highlighted={highlightedId === job.job_id}

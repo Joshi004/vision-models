@@ -13,7 +13,7 @@ export default function Sidebar({ groups, recipes, activeId, showingHistory, onS
   }
 
   return (
-    <nav className="flex shrink-0 flex-row items-center gap-1 overflow-x-auto border-b border-border bg-surface p-2 md:w-60 md:flex-col md:items-stretch md:overflow-visible md:border-b-0 md:border-r md:p-3">
+    <nav className="flex shrink-0 flex-row items-center gap-1 overflow-x-auto border-b border-border bg-surface p-2 md:w-60 md:flex-col md:items-stretch md:overflow-y-auto md:border-b-0 md:border-r md:p-3">
       {groups.map((group, groupIndex) => (
         <div key={group.id} className="flex flex-row gap-1 md:mb-1 md:flex-col md:gap-0.5">
           <p

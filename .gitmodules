@@ -18,3 +18,7 @@
 	path = third_party/breeze-tts
 	url = https://github.com/breezeblue-ai/breeze-tts.git
 	ignore = untracked
+[submodule "TBDub"]
+	path = third_party/TBDub
+	url = https://github.com/TaoLiveAIGC/TBDub.git
+	ignore = untracked

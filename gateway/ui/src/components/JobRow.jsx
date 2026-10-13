@@ -20,9 +20,8 @@ const STATUS_TONE = {
 // request, see App.jsx's handleRetry) once finished, a collapsible
 // "Submitted config" showing the exact request this job was sent with, and
 // a permanent Delete once finished, but only when `onDelete` is actually
-// passed. Shared by JobsPanel.jsx (the small strip beside every form,
-// which never passes onDelete -- see that file) and JobHistory.jsx (the
-// full view, which does).
+// passed. Shared by JobsPanel.jsx (the small strip beside every form) and
+// JobHistory.jsx (the full view); both currently pass onDelete.
 //
 // `onRetry`/`canRetry` are both optional -- omit both to hide Retry
 // entirely (neither current caller does this, but keeps this component
@@ -54,7 +53,12 @@ export default function JobRow({
   // this always-rendered summary line even while the row is collapsed and
   // ResultPreview (the only thing that reads/writes that cache) isn't
   // mounted at all.
-  const isCached = useIsResultCached(job.job_id, job.result_ready);
+  //
+  // A downloaded incognito job reports result_ready false (the server
+  // deleted its file), but this browser may still hold the local copy.
+  const serverCopyGone = job.status === 'succeeded' && Boolean(job.downloaded_at);
+  const hasResult = job.result_ready || serverCopyGone;
+  const isCached = useIsResultCached(job.job_id, hasResult);
 
   async function handleCopyConfig() {
     try {
@@ -119,8 +123,14 @@ export default function JobRow({
           {job.downloaded_at && (
             <p className="text-xs text-muted">Result was downloaded and deleted from the server.</p>
           )}
-          {job.result_ready && (
-            <ResultPreview jobId={job.job_id} pipeline={job.pipeline} request={job.request} incognito={job.incognito} />
+          {hasResult && (
+            <ResultPreview
+              jobId={job.job_id}
+              pipeline={job.pipeline}
+              request={job.request}
+              incognito={job.incognito}
+              serverCopyGone={serverCopyGone}
+            />
           )}
 
           {/* Every job's exact submitted request, for debugging a failed job

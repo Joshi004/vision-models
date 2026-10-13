@@ -84,7 +84,11 @@ function resultExtension(pipeline, request) {
 //
 // `incognito` (the job's own `incognito` flag): the server deletes an
 // incognito job's result once it has been downloaded, so the button says so.
-export default function ResultPreview({ jobId, pipeline, request, incognito = false }) {
+//
+// `serverCopyGone`: the result was already downloaded and deleted from the
+// server, so only a local copy can be shown -- a fresh fetch would just get a
+// 410, so there is no "Load preview" button.
+export default function ResultPreview({ jobId, pipeline, request, incognito = false, serverCopyGone = false }) {
   const [url, setUrl] = useState(null);
   const [transcript, setTranscript] = useState(null);
   const [progress, setProgress] = useState(null);
@@ -164,12 +168,15 @@ export default function ResultPreview({ jobId, pipeline, request, incognito = fa
 
   return (
     <div className="flex flex-col items-start gap-2">
-      {!url && !progress && !checkingCache && (
+      {!url && !progress && !checkingCache && serverCopyGone && (
+        <p className="text-xs text-muted">No local copy of this result in this browser.</p>
+      )}
+      {!url && !progress && !checkingCache && !serverCopyGone && (
         <Button type="button" variant="secondary" size="sm" onClick={handleLoad}>
           {isZip ? 'Load result' : 'Load preview'}
         </Button>
       )}
-      {!url && !progress && !checkingCache && incognito && (
+      {!url && !progress && !checkingCache && !serverCopyGone && incognito && (
         <p className="text-xs text-muted">
           One-time download: loading it deletes the result from the server; this browser keeps a local copy.
         </p>

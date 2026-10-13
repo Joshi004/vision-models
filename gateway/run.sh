@@ -8,10 +8,13 @@
 #   * The `model-api` tmux session on this node is stopped.
 #   * Any other process of yours still listening on port 8012 here is stopped.
 #     If someone else's process holds the port, the script stops with an error.
-#   * A gateway started on a different login node (tmux sessions are per node;
-#     recorded in <data dir>/gateway.host) is stopped over ssh if possible;
+#   * Every gateway of yours on another login node that uses the same data
+#     directory (tmux sessions are per node) is stopped over ssh if possible;
 #     otherwise you get the exact command to run there. Two gateways would
-#     share one jobs.db, and your tunnel may point at the old one.
+#     share one jobs.db, and your tunnel may point at the old one. Gateways
+#     using a different data directory (another checkout) are left alone.
+#     Login nodes are the login-<N> names that resolve here, plus the node
+#     recorded in <data dir>/gateway.host.
 # Restarting does not affect Slurm jobs already submitted: the new gateway
 # picks their status up from jobs.db.
 #
@@ -23,6 +26,8 @@
 #                                          exception: its inputs are deleted when its job ends, its result right after its
 #                                          first complete download, and it keeps no logs)
 #   MODEL_API_UNUSED_UPLOAD_TTL_MINUTES   (delete uploads that no job references after this long, default 60)
+#   MODEL_API_LOGIN_NODES                 (space-separated login nodes to check for other gateways;
+#                                          default: every login-<N> name, N = 0..31, that resolves)
 #
 #   VISION_DATA_DIR                       (default <repo>/../vision-data: envs/, weights/, jobs/, jobs.db live here)
 #
@@ -59,21 +64,44 @@ if [ -n "${MODEL_API_PORT:-}" ] && [ "$MODEL_API_PORT" != "$PORT" ]; then
   echo "Note: ignoring MODEL_API_PORT=$MODEL_API_PORT -- the gateway always runs on port $PORT."
 fi
 
-# 1. A gateway last started on another login node.
+# 1. Gateways on other login nodes that share this data directory.
+LOGIN_NODES="${MODEL_API_LOGIN_NODES:-$(for i in $(seq 0 31); do if getent hosts "login-$i" >/dev/null; then echo "login-$i"; fi; done)}"
 if [ -f "$NODE_FILE" ]; then
-  OTHER_NODE="$(head -n 1 "$NODE_FILE" | cut -d' ' -f1)"
-  if [ -n "$OTHER_NODE" ] && [ "$OTHER_NODE" != "$THIS_NODE" ] \
-     && curl -s -m 3 "http://$OTHER_NODE:$PORT/v1/health" | grep -q '"status":"ok"'; then
-    echo "A gateway is running on $OTHER_NODE; stopping it..."
-    if ssh -o BatchMode=yes -o ConnectTimeout=5 "$OTHER_NODE" "tmux kill-session -t $SESSION" 2>/dev/null; then
-      echo "Stopped the gateway on $OTHER_NODE."
-    else
-      echo "WARNING: could not stop it automatically. Run this on $OTHER_NODE:"
-      echo "           tmux kill-session -t $SESSION"
-      echo "         Until then two gateways share one jobs.db."
-    fi
-  fi
+  LOGIN_NODES="$LOGIN_NODES $(head -n 1 "$NODE_FILE" | cut -d' ' -f1)"
 fi
+
+# Runs on the other node (data dir as $1): stops each of your gateways there
+# whose VISION_DATA_DIR is this data directory, by killing the tmux session
+# whose pane started it (or the process itself if it isn't in tmux).
+read -r -d '' STOP_REMOTE_GATEWAYS <<'EOF' || true
+data_dir="$1"
+for pid in $(pgrep -u "$(id -u)" -f 'uvicorn server:app'); do
+  tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -qxF "VISION_DATA_DIR=$data_dir" || continue
+  parent="$(ps -o ppid= -p "$pid" | tr -d ' ')"
+  session="$(tmux list-panes -a -F '#{pane_pid} #{session_name}' 2>/dev/null | awk -v p="$parent" '$1 == p { print $2; exit }')"
+  if [ -n "$session" ]; then
+    tmux kill-session -t "$session" && echo "  stopped tmux session '$session' (gateway pid $pid)"
+  else
+    kill "$pid" && echo "  stopped gateway pid $pid"
+  fi
+done
+EOF
+
+for NODE in $(printf '%s\n' $LOGIN_NODES | sort -u); do
+  [ "$NODE" = "$THIS_NODE" ] && continue
+  OTHER_HEALTH="$(curl -s -m 3 "http://$NODE:$PORT/v1/health" || true)"
+  [[ "$OTHER_HEALTH" == *'"status":"ok"'* ]] || continue
+  echo "A gateway is answering on $NODE:$PORT; stopping it if it uses $DATA_DIR..."
+  # accept-new: login nodes not yet in known_hosts are added on first use
+  # (that failure is what used to leave old gateways running); a node whose
+  # key has changed is still refused.
+  if ! ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new \
+       "$NODE" "bash -s -- $(printf '%q' "$DATA_DIR")" <<< "$STOP_REMOTE_GATEWAYS"; then
+    echo "WARNING: could not check $NODE automatically. On $NODE, stop the gateway that uses"
+    echo "         $DATA_DIR (usually: tmux kill-session -t $SESSION)."
+    echo "         Until then two gateways share one jobs.db."
+  fi
+done
 
 # 2. This node: the tmux session, then anything of ours still on the port.
 if tmux has-session -t "$SESSION" 2>/dev/null; then
