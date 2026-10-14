@@ -26,8 +26,19 @@ because accelerate's weight-loading context patches torch globally). When the
 child is done it hands the small
 conditioning result (the text embedding and the resolved canvas/frame
 count/keyframes/references) over as one file in --work-dir, and exits, which
-frees its GPU. Output quality does not depend on this split: the same bf16
-weights run the same computation as on one big GPU.
+frees its GPU.
+
+That freed GPU is then used a second time, for denoising: the transformer's 50
+blocks are split, blocks 0-24 stay on the first GPU and blocks 25-49 move to the
+second (see `split_transformer`). Each GPU then holds about 31 GiB of weights, so
+a long clip at the full 1344x768 canvas (345 frames is ~103k tokens) has ~45 GiB
+per GPU for activations, where one GPU holding all 61.7 GiB ran out of memory.
+The blocks still run one after another; per denoising step the hidden states cross
+between the GPUs once each way, plus a copy of the (~0.1 GB) rotary table for each
+moved block, which costs seconds over a whole job.
+
+Output quality does not depend on any of this: the same bf16 weights run the
+same computation as on one big GPU.
 
 Three workflows, matching diffusers' (`pipe.blocks.available_workflows`):
   t2va  : text only                       -> `transformer/` partition ("FL2VA" checkpoint)
@@ -87,6 +98,9 @@ WORKFLOWS = ("t2va", "fl2va", "ref2va")
 HANDOFF_NAME = "h3_conditioning.pt"
 HANDOFF_ERROR_NAME = "h3_conditioning_error.txt"
 OUTPUTS = ["videos", "audio", "sampling_rate"]
+# The transformer has 50 blocks; during denoising the first SPLIT_AT stay on the generation GPU and the rest run on
+# the conditioning GPU, which is idle once the encoder's process has exited.
+SPLIT_AT = 25
 
 _STARTED = time.time()
 
@@ -319,6 +333,31 @@ def run_condition_stage(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 
+def split_transformer(model, second_device: str = "cuda:1", first_device: str = "cuda:0") -> int:
+    """Move `model.transformer_blocks[SPLIT_AT:]` onto `second_device`, so the 61.7 GiB of weights are shared
+    between two GPUs and the first one has room left for the activations of a long, full-size clip.
+
+    Everything else (the input projections, the text refiner, `norm_out` and the output heads) stays on
+    `first_device`, which is also the device `model.device` reports (that of its first parameter), so the offload
+    manager does not try to move the model back. The blocks still run one after another, so the result is the same;
+    forward hooks only carry the inputs of the first moved block over to `second_device` and the output of the last
+    block back. Returns the number of blocks moved."""
+    from accelerate.utils import send_to_device
+
+    def move_inputs(module, args, kwargs):
+        return send_to_device(args, second_device), send_to_device(kwargs, second_device)
+
+    def move_output_back(module, args, output):
+        return output.to(first_device)
+
+    moved_blocks = model.transformer_blocks[SPLIT_AT:]
+    for block in moved_blocks:
+        block.to(second_device)
+        block.register_forward_pre_hook(move_inputs, with_kwargs=True)
+    model.transformer_blocks[-1].register_forward_hook(move_output_back)
+    return len(moved_blocks)
+
+
 def run_pipeline(args: argparse.Namespace) -> int:
     generation_gpu, conditioning_gpu = pick_gpus()
     check_weights(args.model_dir, args.workflow)
@@ -329,8 +368,10 @@ def run_pipeline(args: argparse.Namespace) -> int:
     handoff.unlink(missing_ok=True)
     error_file.unlink(missing_ok=True)
 
-    # Each process sees only its own GPU, as cuda:0. This must happen before torch is imported.
-    os.environ["CUDA_VISIBLE_DEVICES"] = generation_gpu
+    # This process sees both GPUs: the generation GPU as cuda:0 and the conditioning GPU as cuda:1. Nothing here
+    # touches cuda:1 until the child (which sees only the conditioning GPU, as its cuda:0, see the Popen env below)
+    # has exited. This must happen before torch is imported.
+    os.environ["CUDA_VISIBLE_DEVICES"] = f"{generation_gpu},{conditioning_gpu}"
     # Less fragmentation while 60 GB models are moved on and off the GPU.
     os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
     log("run", f"generation GPU {generation_gpu}, conditioning GPU {conditioning_gpu}")
@@ -390,6 +431,14 @@ def run_pipeline(args: argparse.Namespace) -> int:
             raise RuntimeError(f"conditioning step failed: {reason}")
         log("run", f"conditioning ready (waited {time.time() - waited:.0f}s for it)")
 
+        # The child has exited, so the second GPU is free: the second half of the transformer goes there.
+        started = time.time()
+        moved = split_transformer(denoiser)
+        log("run", f"transformer blocks {SPLIT_AT}-{SPLIT_AT + moved - 1} moved to the second GPU in {time.time() - started:.0f}s")
+        # Count peaks from here on: the first GPU held the whole transformer until just now.
+        torch.cuda.reset_peak_memory_stats(0)
+        torch.cuda.reset_peak_memory_stats(1)
+
         conditioning = torch.load(handoff, weights_only=False)  # written by the child just above, in our own job folder
         device = torch.device("cuda:0")
         kwargs = dict(conditioning["values"])
@@ -407,7 +456,11 @@ def run_pipeline(args: argparse.Namespace) -> int:
         results = pipeline(output=OUTPUTS, **kwargs)
         frames = results["videos"][0]
         log("run", f"generated {len(frames)} frames of {frames[0].size[0]}x{frames[0].size[1]} in {time.time() - started:.0f}s")
-        log("run", f"peak GPU memory {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB")
+        log(
+            "run",
+            f"peak GPU memory since the split: generation GPU {torch.cuda.max_memory_allocated(0) / 2**30:.1f} GiB, "
+            f"second GPU {torch.cuda.max_memory_allocated(1) / 2**30:.1f} GiB",
+        )
 
         encode_video(
             frames,

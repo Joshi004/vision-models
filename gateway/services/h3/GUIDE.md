@@ -126,7 +126,8 @@ as the audio (kept within 5.17 to 14.4 s).
 Identical to the other backends: submit, poll `GET /v1/jobs/{job_id}` every 10-15 seconds, then download
 `GET /v1/jobs/{job_id}/result`. Every request is an independent cold start -- there is no warm model between
 requests -- on **two H100s on one node**: the Qwen3-VL-32B encoder (62 GiB of bf16 weights) on one and the 33B
-transformer (61.7 GiB) on the other, both loaded at the same time. The weights are read from network storage on every
+transformer (61.7 GiB) on the other, both loaded at the same time. When the encoder is done, half of the transformer's
+blocks move to its GPU, so the two GPUs share the generation. The weights are read from network storage on every
 job, so most of a short job's wall time is loading.
 
 **Timing has not been measured on this cluster yet.** Budget more than 10 minutes per request until real runs have
@@ -134,9 +135,11 @@ replaced this paragraph; `typical_run_seconds` on a job starts from a pessimisti
 real runs by itself. Larger canvases and longer clips cost far more than linearly (diffusers' documentation: 960x544 is
 about 2.3x faster per step than 1344x768).
 
-**GPU memory is the main unknown.** The transformer alone takes 61.7 GiB of an 80 GB card, which leaves roughly 17 GiB for
-the activations. A long clip at the full 1344x768 canvas may not fit; if a job fails with an out-of-memory error, retry
-with a smaller canvas (for example `height` 544, `width` 960) or a shorter `duration_seconds`.
+**GPU memory.** With the whole transformer on one 80 GB card, a 345-frame (14.4 s) clip at the full 1344x768 canvas ran
+out of memory, while 124 frames fit. Sharing the transformer between the two GPUs gives each about 45 GiB for the
+activations, which is meant to fix that, but **a full-size 14.4 s clip has not been confirmed to complete yet**. If a job
+fails with an out-of-memory error, retry with a smaller canvas (for example `height` 544, `width` 960) or a shorter
+`duration_seconds`.
 
 ### 7. Licence and responsible use
 

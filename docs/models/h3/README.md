@@ -75,15 +75,19 @@ Slurm job (2 GPUs)  ->  run_h3.py (GPU a: generation)
                           |      before_encode -> text_encoder           loads ~62 GiB encoder
                           |      writes work/h3_conditioning.pt, exits
                           |-- loads transformer(_ref) + VAEs             loads ~77 GB, at the same time
-                          |-- waits for the child, reads the handoff
-                          '-- vae_encoder -> denoise (N steps) -> decode -> MP4 (PyAV)
+                          |-- waits for the child (it exits, GPU b is free), reads the handoff
+                          |-- moves transformer blocks 25-49 (~31 GiB) onto GPU b
+                          '-- vae_encoder -> denoise (N steps; blocks 0-24 on GPU a, 25-49 on GPU b)
+                                          -> decode -> MP4 (PyAV)
 ```
 
 - The conditioning half's outputs are exactly the inputs the rest reads by name (checked against diffusers' block graph on
   CPU): the text embedding and its row tags, plus the resolved `height`/`width`, `num_frames`, `keyframes` or
   `normalized_references`. They cross as one pickle file in the job's own folder, which the runner deletes when it ends.
 - **Two processes, not threads**, so the two sets of weights are read from disk in parallel: accelerate's weight-loading
-  context patches torch globally, which is not safe across threads. Each process sees only its own GPU (as `cuda:0`).
+  context patches torch globally, which is not safe across threads. The child sees only the conditioning GPU (as its
+  `cuda:0`). The parent sees both: the generation GPU as `cuda:0` and the conditioning GPU as `cuda:1`, and it only touches
+  `cuda:1` after the child has exited.
 - Loading is lazy: `load_components` memory-maps the weights in seconds, and they are only read from disk when a model
   first moves onto its GPU. The encoder moves when it first runs; the generation half moves the transformer and VAEs onto
   its GPU straight away, while the encoder works, so both reads really overlap (the first runs showed the transformer
@@ -93,6 +97,15 @@ Slurm job (2 GPUs)  ->  run_h3.py (GPU a: generation)
   never for activations, so with the transformer (61.7 GiB) and both VAEs (10.3 GiB) resident, the first audio-to-video
   jobs ran out of memory on the first denoising step even at 124 frames (generate jobs fit, peaking at 75 GiB). The
   runner moves both VAEs to host RAM at the first transformer step; their offload hooks bring them back for the decode.
+- **The transformer is split across both GPUs for denoising.** With all 61.7 GiB on one card, a 345-frame 1344x768 clip
+  (about 103k video tokens) ran out of memory in the first denoising step: the feed-forward layer alone briefly needs
+  12-13 GiB for that sequence, and the 79 GiB card had about 17 GiB left. The conditioning GPU is idle once the encoder's
+  process has exited, so `split_transformer` in `run_h3.py` moves blocks 25-49 of the 50 onto it (`SPLIT_AT`). Each GPU then
+  holds about 31 GiB of weights. Everything outside the block stack (input projections, text refiner, output heads) stays on
+  the generation GPU, which is also the device the offload manager looks at, so it does not move the blocks back. Forward
+  hooks carry the inputs of block 25 to the second GPU and the output of block 49 back; the blocks still run one after
+  another, so the output is the same. Per denoising step, one hidden-state tensor crosses each way, plus a copy of the
+  rotary table (about 0.1 GiB) for each moved block.
 - A job is a cold start every time, like every other backend here: nothing stays loaded.
 
 ## Setup
@@ -144,7 +157,7 @@ TBDub):
 | | To record |
 |---|---|
 | Load time, conditioning half / generation half | printed in the job's `run.log` (`loaded in ...s`) |
-| Peak GPU memory, each GPU | printed at the end of each half; the transformer alone is 61.7 GiB of ~79 GiB, so a 15 s clip at 1344x768 may not fit |
+| Peak GPU memory, each GPU | the conditioning half prints its own peak; the generation half prints `peak GPU memory since the split: generation GPU ..., second GPU ...` (counted from after the transformer is split, so the earlier full load does not count) |
 | Peak host RAM | from `sacct`/`seff` (expected ~134 GiB, about 144 GB, while both halves load) |
 | Denoising time, 1344x768, 124 frames and 345 frames | `generated N frames ... in ...s` |
 | Whole job, cold | Slurm run time; this replaces `TYPICAL_RUN_SECONDS` (20 min, a guess) and `H3_API_TIME` |
@@ -153,8 +166,13 @@ TBDub):
 
 **Likely first problems**
 
-- **Out of GPU memory on the generation GPU** for a long clip at full size: retry with a smaller canvas (960x544 is the
-  documented speed lever) or a shorter clip; if it persists, the transformer would need group offloading, which is not wired in.
+- **Out of GPU memory on the generation GPU** for a long clip at full size. Measured with the whole transformer on one
+  card (peak GPU memory, 1344x768 unless noted): 124 frames 70.4 GiB, 243 frames at 768x992 71.4 GiB, and 345 frames ran out
+  of memory in the first denoising step. The transformer split across both GPUs (see above) is meant to fix this, but **it has
+  not yet been run end to end**: record the two `peak GPU memory since the split` figures and the `generated N frames ... in ...s`
+  time for 345 frames at 1344x768, and for 124 frames to compare with the earlier ~710 s. If a job still runs out of memory,
+  retry with a smaller canvas (960x544 is the documented speed lever) or a shorter clip; the next step would be group
+  offloading, which is not wired in.
 - **Host RAM:** both halves hold their weights in RAM while loading. If a job is killed for memory, raise `H3_MEM_PER_GPU`.
 - **`_flash_3_hub` offline:** the kernel is fetched from the Hub by the `kernels` package, which is not in the environment, and
   jobs run with `HF_HUB_OFFLINE=1`. Untested sketch: `uv pip install kernels` into `envs/h3`, then on a node with internet run

@@ -10,7 +10,10 @@ against what you last integrated against.
   generated sound; `pipeline` `h3:audio-to-video`). Unlike every other backend a job holds **two** GPUs on one node.
   The prompt is used exactly as sent (no rewriting) and H3 expects a structured prompt format -- see the MiniMax H3
   section. Unlike the LTX audio-to-video endpoints, the uploaded audio is a *reference*, not audio muxed into the
-  result unchanged. 768p, fixed 24 fps, 5.17 to 14.4 s. No change to any existing endpoint.
+  result unchanged. 768p, fixed 24 fps, 5.17 to 14.4 s. While the video is generated the job's second GPU also runs
+  half of the transformer, so the longest clips at the full 1344x768 canvas have the memory they need (a full-size
+  14.4 s clip had run out of memory on one GPU; the fix is not yet confirmed by a completed run). No change to any
+  existing endpoint.
 - **0.12.0** (2026-10-12): Added an eighth backend, TBDub lip sync, in two forms. (1) `POST /v1/ltx/videos/audio-to-video`
   and `POST /v1/ltx25/videos/audio-to-video` accept a new optional boolean `lip_sync` (default `false`): after the
   video is generated, a dedicated lip-sync model redraws the mouth to match the audio exactly, in the same job.
