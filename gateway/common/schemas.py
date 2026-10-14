@@ -240,6 +240,8 @@ class JobStatusResponse(BaseModel):
             "qwen-image21:generate",
             "qwen-image21:edit",
             "tbdub:lip-sync",
+            "h3:generate",
+            "h3:audio-to-video",
         ],
     )
     status: Literal["queued", "running", "succeeded", "failed"] = Field(

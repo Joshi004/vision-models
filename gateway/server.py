@@ -55,6 +55,8 @@ from common.one_time_file_response import OneTimeFileResponse
 from common.slurm import cancel_slurm_job
 from services.breeze_tts import config as breeze_tts_config
 from services.breeze_tts.router import router as breeze_tts_router
+from services.h3 import config as h3_config
+from services.h3.router import router as h3_router
 from services.ltx import config as ltx_config
 from services.ltx.router import router as ltx_router
 from services.ltx25 import config as ltx25_config
@@ -95,7 +97,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="GPU Cluster Model-Serving API",
-    version="0.12.0",
+    version="0.13.0",
     description=openapi_docs.APP_DESCRIPTION,
     openapi_tags=openapi_docs.TAGS_METADATA,
     lifespan=lifespan,
@@ -112,6 +114,7 @@ app.include_router(parakeet_router, prefix="/v1/parakeet")
 app.include_router(breeze_tts_router, prefix="/v1/breeze-tts")
 app.include_router(qwen_image21_router, prefix="/v1/qwen-image21")
 app.include_router(tbdub_router, prefix="/v1/tbdub")
+app.include_router(h3_router, prefix="/v1/h3")
 
 # Registered backends, for GET /v1/guide (common/guide.py) -- each entry is
 # a small, enumerable set of facts: display name, path prefix, and where
@@ -129,6 +132,7 @@ _BACKENDS: list[guide.BackendInfo] = [
     guide.BackendInfo(id="breeze-tts", name="Breeze TTS 2 text-to-speech", prefix="/v1/breeze-tts", guide_file="breeze_tts/GUIDE.md"),
     guide.BackendInfo(id="qwen-image21", name="Qwen-Image-2.1 image generation", prefix="/v1/qwen-image21", guide_file="qwen_image21/GUIDE.md"),
     guide.BackendInfo(id="tbdub", name="TBDub lip sync", prefix="/v1/tbdub", guide_file="tbdub/GUIDE.md"),
+    guide.BackendInfo(id="h3", name="MiniMax H3", prefix="/v1/h3", guide_file="h3/GUIDE.md"),
 ]
 
 
@@ -242,6 +246,7 @@ _TYPICAL_FALLBACK_SECONDS: dict[str, float] = {
     "breeze-tts": breeze_tts_config.TYPICAL_RUN_SECONDS,
     "qwen-image21": qwen_image21_config.TYPICAL_RUN_SECONDS,
     "tbdub": tbdub_config.TYPICAL_RUN_SECONDS,
+    "h3": h3_config.TYPICAL_RUN_SECONDS,
 }
 
 # Same idea, but for live progress readers -- most backends have none

@@ -52,6 +52,12 @@
 #   TBDUB_MEM_PER_GPU, TBDUB_CPUS, TBDUB_API_TIME     (TBDub lip-sync backend's own Slurm allocation shape; defaults 64G, 8, 02:00:00)
 #   TBDUB_LIPSYNC_EXTRA_SECONDS                       (default 1800: time added to an LTX audio-to-video job's limit when it asks for
 #                                                      lip sync, and the most the lip-sync step may then take before it is stopped)
+#
+#   H3_MODEL_DIR                                      (default <data dir>/weights/h3/MiniMax-H3)
+#   H3_MEM_PER_GPU, H3_CPUS, H3_API_TIME              (MiniMax H3 backend's own Slurm allocation shape; every job holds 2 GPUs;
+#                                                      defaults 112G per GPU, 16 CPUs in total, 01:30:00 -- estimates, not yet measured)
+#   H3_ATTENTION_BACKEND                              (optional diffusers attention backend for the transformer, e.g. _flash_3_hub;
+#                                                      unset = diffusers' default. See docs/models/h3/README.md before enabling)
 set -euo pipefail
 
 API_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

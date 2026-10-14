@@ -4,6 +4,13 @@ Dates are when a change shipped on this codebase, not necessarily when you're re
 `api_version` field (`GET /v1/guide?format=json`) is this server's own current version; compare it
 against what you last integrated against.
 
+- **0.13.0** (2026-10-14): Added a ninth backend, MiniMax H3 (open weights, bf16): `POST /v1/h3/videos/generate`
+  (text, or a first and/or last frame, to video with generated stereo sound; `pipeline` `h3:generate`) and
+  `POST /v1/h3/videos/audio-to-video` (an audio reference plus image and/or video references to video with
+  generated sound; `pipeline` `h3:audio-to-video`). Unlike every other backend a job holds **two** GPUs on one node.
+  The prompt is used exactly as sent (no rewriting) and H3 expects a structured prompt format -- see the MiniMax H3
+  section. Unlike the LTX audio-to-video endpoints, the uploaded audio is a *reference*, not audio muxed into the
+  result unchanged. 768p, fixed 24 fps, 5.17 to 14.4 s. No change to any existing endpoint.
 - **0.12.0** (2026-10-12): Added an eighth backend, TBDub lip sync, in two forms. (1) `POST /v1/ltx/videos/audio-to-video`
   and `POST /v1/ltx25/videos/audio-to-video` accept a new optional boolean `lip_sync` (default `false`): after the
   video is generated, a dedicated lip-sync model redraws the mouth to match the audio exactly, in the same job.

@@ -14,7 +14,21 @@ import { XIcon } from './icons.jsx';
 // next`, never a plain array, for the same reason as ImageConditioningList:
 // several rows can be mid-upload at once, and each row's progress callbacks
 // must apply to the latest list rather than whatever this render closed over.
-export default function ReferenceImageList({ model, field, images, onChange, minImages = 1, maxImages = 10 }) {
+//
+// `itemLabel`, `accept` and `addLabel` default to the image wording above; the
+// MiniMax H3 audio-to-video form reuses this same list for its reference
+// videos (`accept="video/*"`), which are `{ asset }` entries just the same.
+export default function ReferenceImageList({
+  model,
+  field,
+  images,
+  onChange,
+  minImages = 1,
+  maxImages = 10,
+  itemLabel = 'Reference image',
+  accept = 'image/*',
+  addLabel = 'Add reference image',
+}) {
   function updateImage(index, asset) {
     onChange((previous) => previous.map((item, i) => (i === index ? { asset } : item)));
   }
@@ -35,8 +49,8 @@ export default function ReferenceImageList({ model, field, images, onChange, min
             <AssetUpload
               model={model}
               field={field}
-              label={`Reference image ${index + 1}`}
-              accept="image/*"
+              label={`${itemLabel} ${index + 1}`}
+              accept={accept}
               value={entry.asset}
               onChange={(next) => updateImage(index, next)}
               required
@@ -48,7 +62,7 @@ export default function ReferenceImageList({ model, field, images, onChange, min
               variant="ghost"
               size="sm"
               onClick={() => removeImage(index)}
-              aria-label={`Remove reference image ${index + 1}`}
+              aria-label={`Remove ${itemLabel.toLowerCase()} ${index + 1}`}
             >
               <XIcon className="h-3.5 w-3.5" />
               Remove
@@ -58,7 +72,7 @@ export default function ReferenceImageList({ model, field, images, onChange, min
       ))}
       {images.length < maxImages && (
         <Button type="button" variant="secondary" size="sm" onClick={addImage} className="self-start">
-          Add reference image
+          {addLabel}
         </Button>
       )}
     </div>

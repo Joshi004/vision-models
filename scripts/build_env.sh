@@ -3,7 +3,7 @@
 # from its frozen lock file.
 #
 # Usage:  scripts/build_env.sh <name>
-#   <name> is one of: gateway ltx23 ltx25 wan_animate rvc parakeet breeze_tts qwen_image21 tbdub
+#   <name> is one of: gateway ltx23 ltx25 wan_animate rvc parakeet breeze_tts qwen_image21 tbdub h3
 #
 # Lock file (the single source of truth for that environment):
 #   gateway          -> gateway/requirements.lock.txt

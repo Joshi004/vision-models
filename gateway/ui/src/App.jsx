@@ -8,6 +8,8 @@ import { FilmIcon, LayersIcon, WaveIcon, RedoIcon, MusicIcon, SwapUserIcon, MicI
 import TextToVideoForm from './forms/TextToVideoForm.jsx';
 import Ltx25TextToVideoForm from './forms/Ltx25TextToVideoForm.jsx';
 import Ltx25InterpolateForm from './forms/Ltx25InterpolateForm.jsx';
+import H3GenerateForm from './forms/H3GenerateForm.jsx';
+import H3AudioToVideoForm from './forms/H3AudioToVideoForm.jsx';
 import KeyframeInterpolationForm from './forms/KeyframeInterpolationForm.jsx';
 import AudioToVideoForm from './forms/AudioToVideoForm.jsx';
 import RetakeForm from './forms/RetakeForm.jsx';
@@ -30,6 +32,7 @@ import { setIncognito as setGlobalIncognito } from './incognito.js';
 const GROUPS = [
   { id: 'ltx', label: 'LTX-2.3' },
   { id: 'ltx25', label: 'LTX-2.5' },
+  { id: 'h3', label: 'MiniMax H3' },
   { id: 'wan', label: 'Wan-Animate' },
   { id: 'lipsync', label: 'Lip Sync' },
   { id: 'rvc', label: 'Voice Conversion' },
@@ -138,6 +141,24 @@ const RECIPES = [
     // forms/RetakeForm.jsx.
     formProps: { formId: 'ltx25-retake', model: 'Ltx25RetakeRequest', endpoint: '/v1/ltx25/videos/retake', title: 'Retake (LTX-2.5)' },
     pipeline: 'ltx25:retake',
+  },
+  {
+    id: 'h3-generate',
+    label: 'Text / frame to video',
+    description: 'Generate a video with sound on MiniMax H3 from a prompt, optionally from a first and/or last frame. Two GPUs per job.',
+    group: 'h3',
+    icon: FilmIcon,
+    Component: H3GenerateForm,
+    pipeline: 'h3:generate',
+  },
+  {
+    id: 'h3-audio-to-video',
+    label: 'Audio to video',
+    description: 'Generate a video with sound on MiniMax H3 from an audio reference plus image and/or video references. Two GPUs per job.',
+    group: 'h3',
+    icon: WaveIcon,
+    Component: H3AudioToVideoForm,
+    pipeline: 'h3:audio-to-video',
   },
   {
     id: 'wan-replace',
