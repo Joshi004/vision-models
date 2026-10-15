@@ -389,11 +389,18 @@ def run_pipeline(args: argparse.Namespace) -> int:
         pipeline, seconds = make_pipeline(rest_blocks, args.model_dir, "cuda:0")
         log("run", f"set up in {seconds:.0f}s")
         if args.attention_backend:
+            from diffusers.models.attention_dispatch import _AttentionBackendRegistry
+
+            default_backend = _AttentionBackendRegistry._active_backend
             for name in ("transformer", "transformer_ref"):
                 model = getattr(pipeline, name, None)
                 if model is not None:
                     model.set_attention_backend(args.attention_backend)
-            log("run", f"attention backend: {args.attention_backend}")
+            # set_attention_backend also makes the backend the process-wide default, which would reach the audio VAE
+            # (float32 causal attention: FlashAttention-3 only takes bf16/fp16 and failed there). The transformer's
+            # attention layers keep the backend set on them above; everything else goes back to the default.
+            _AttentionBackendRegistry.set_active_backend(default_backend)
+            log("run", f"attention backend: {args.attention_backend} (transformer only)")
 
         # Loading is lazy (memory-mapped): the weights are only read from disk when a model first moves onto the GPU.
         # Move them now, while the encoder works in the other process, so both halves really read in parallel.

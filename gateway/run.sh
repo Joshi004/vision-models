@@ -56,8 +56,11 @@
 #   H3_MODEL_DIR                                      (default <data dir>/weights/h3/MiniMax-H3)
 #   H3_MEM_PER_GPU, H3_CPUS, H3_API_TIME              (MiniMax H3 backend's own Slurm allocation shape; every job holds 2 GPUs;
 #                                                      defaults 112G per GPU, 16 CPUs in total, 01:30:00 -- estimates, not yet measured)
-#   H3_ATTENTION_BACKEND                              (optional diffusers attention backend for the transformer, e.g. _flash_3_hub;
-#                                                      unset = diffusers' default. See docs/models/h3/README.md before enabling)
+#   H3_ATTENTION_BACKEND                              (diffusers attention backend for the H3 transformer; default _flash_3_hub
+#                                                      = FlashAttention-3 on Hopper. Set it to an empty string to use diffusers'
+#                                                      default instead. Needs the `kernels` package in envs/h3 and the
+#                                                      flash-attn3 kernel in the Hugging Face cache, because jobs run offline;
+#                                                      see docs/models/h3/README.md)
 set -euo pipefail
 
 API_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,6 +71,8 @@ PORT=8012
 HOST="${MODEL_API_HOST:-0.0.0.0}"
 THIS_NODE="$(hostname)"
 NODE_FILE="$DATA_DIR/gateway.host"
+# `-` (not `:-`): unset -> FlashAttention-3; set but empty -> diffusers' default backend.
+H3_ATTENTION_BACKEND="${H3_ATTENTION_BACKEND-_flash_3_hub}"
 
 if [ -n "${MODEL_API_PORT:-}" ] && [ "$MODEL_API_PORT" != "$PORT" ]; then
   echo "Note: ignoring MODEL_API_PORT=$MODEL_API_PORT -- the gateway always runs on port $PORT."
@@ -138,7 +143,7 @@ fi
 
 # 3. Start, then wait for the health check.
 tmux new-session -d -s "$SESSION" \
-  "export VISION_DATA_DIR='$DATA_DIR'; cd '$API_DIR' && '$DATA_DIR/envs/gateway/bin/uvicorn' server:app --host '$HOST' --port $PORT; exec bash"
+  "export VISION_DATA_DIR='$DATA_DIR'; export H3_ATTENTION_BACKEND=$(printf '%q' "$H3_ATTENTION_BACKEND"); cd '$API_DIR' && '$DATA_DIR/envs/gateway/bin/uvicorn' server:app --host '$HOST' --port $PORT; exec bash"
 echo "$THIS_NODE $PORT" > "$NODE_FILE"
 
 echo -n "Starting on $THIS_NODE:$PORT "
@@ -156,6 +161,7 @@ if ! echo "$HEALTH" | grep -q '"status":"ok"'; then
 fi
 
 echo "Running:  $HEALTH"
+echo "H3 attention backend: ${H3_ATTENTION_BACKEND:-default (diffusers)}"
 echo "Node:     $THIS_NODE   (forward port $PORT from THIS node)"
 echo "Tunnel:   ssh -N -L $PORT:localhost:$PORT <you>@$THIS_NODE   (or let Cursor/VS Code forward port $PORT)"
 echo "Attach:   tmux attach -t $SESSION   (Ctrl-b d to detach without stopping it)"
