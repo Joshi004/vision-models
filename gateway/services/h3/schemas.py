@@ -64,26 +64,26 @@ class H3ShapeMixin(BaseModel):
     )
     duration_seconds: float | None = Field(
         None,
-        ge=config.MIN_DURATION_SECONDS,
+        gt=0,
         le=config.MAX_DURATION_SECONDS,
         description=(
-            f"Video length in seconds ({config.MIN_DURATION_SECONDS:g} to {config.MAX_DURATION_SECONDS:g}). H3 runs at "
+            f"Video length in seconds, above 0 and up to {config.MAX_DURATION_SECONDS:g}. H3 runs at "
             f"a fixed {config.FPS} fps and only decodes frame counts of the form 17*n+5, so the length is rounded up "
-            f"to the next such count and kept within {config.MIN_FRAMES} to {config.MAX_FRAMES} frames "
-            f"({config.MIN_FRAMES / config.FPS:.2f} to {config.MAX_FRAMES / config.FPS:.1f} s): 15 s becomes "
-            f"{config.MAX_FRAMES} frames. Mutually exclusive with num_frames. Omit both for the default, "
+            "to the next such count (5 s, 120 frames, becomes 124 frames, 5.17 s; 1 s, 24 frames, becomes 39 frames). EXPERIMENTAL outside 5 to 15 s: the model is "
+            "documented for that range only, so shorter or longer clips may look or sound wrong, fail, or (long ones) "
+            "run out of GPU memory. Mutually exclusive with num_frames. Omit both for the default, "
             f"{config.DEFAULT_FRAMES} frames ({config.DEFAULT_FRAMES / config.FPS:.2f} s)."
         ),
         examples=[5],
     )
     num_frames: int | None = Field(
         None,
-        ge=int(config.MIN_DURATION_SECONDS * config.FPS),
+        ge=1,
         le=int(config.MAX_DURATION_SECONDS * config.FPS),
         description=(
-            "Exact frame count at 24 fps instead of a duration; rounded up to the next 17*n+5 and kept within "
-            f"{config.MIN_FRAMES} to {config.MAX_FRAMES} frames, like duration_seconds. Mutually exclusive with "
-            "duration_seconds."
+            "Exact frame count at 24 fps instead of a duration; rounded up to the next 17*n+5, like duration_seconds "
+            "(the same EXPERIMENTAL warning applies outside 124 to 345 frames, the documented 5 to 15 s). Mutually "
+            "exclusive with duration_seconds."
         ),
         examples=[None],
     )
@@ -204,7 +204,7 @@ class H3AudioToVideoRequest(H3ShapeMixin, H3SamplingMixin, PartitionOptionMixin,
         ...,
         description=(
             "asset_id (from POST /v1/uploads) of the audio, or of a video whose audio track is used, that serves as "
-            "the audio reference (`<Audio 1>` in the prompt). 2 to 15 seconds. Mono or stereo at any sample rate "
+            "the audio reference (`<Audio 1>` in the prompt). Documented for 2 to 15 seconds; other lengths are experimental (see match_audio_duration). Mono or stereo at any sample rate "
             "(resampled to 32 kHz). Never used on its own: it needs at least one image or video reference. "
             "This is a reference, not audio that is muxed into the result unchanged -- see the endpoint description."
         ),
@@ -233,9 +233,11 @@ class H3AudioToVideoRequest(H3ShapeMixin, H3SamplingMixin, PartitionOptionMixin,
     match_audio_duration: bool = Field(
         False,
         description=(
-            "If true, the video is as long as the audio reference (rounded onto the 17*n+5 frame grid and kept within "
-            f"{config.MIN_FRAMES} to {config.MAX_FRAMES} frames, so an audio shorter than 5.17 s or longer than 14.4 s "
-            "is padded or cut). Mutually exclusive with duration_seconds and num_frames."
+            "If true, the video is as long as the audio reference, rounded up onto the 17*n+5 frame grid (so it can be "
+            "a few frames longer than the audio, never shorter, and the audio is never cut). There is no minimum "
+            "length; the audio must not be longer than "
+            f"{config.MAX_DURATION_SECONDS:g} s, otherwise the job fails. EXPERIMENTAL for audio outside 5 to 15 s: "
+            "the model is documented for that range only. Mutually exclusive with duration_seconds and num_frames."
         ),
         examples=[False],
     )

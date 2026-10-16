@@ -29,8 +29,9 @@ structured prompt format; write it yourself (see the MiniMax H3 section of `GET 
 no `negative_prompt` and no guidance scale: the weights are guidance-distilled.
 
 **Shape and length.** 24 fps, 768 pixels on the short edge by default (1344x768 landscape, 768x1344
-portrait), 5.17 to 14.4 seconds (frame counts are 17*n+5). Only 768p is available from the open
-weights; the hosted service's 2K upscaling pass is not part of them.
+portrait). Lengths are rounded up to the next 17*n+5 frame count; the model is documented for 5.17 to
+14.4 seconds and anything shorter or longer is **experimental** (quality unknown, long clips may run out
+of GPU memory). Only 768p is available from the open weights; the hosted service's 2K upscaling pass is not part of them.
 
 Output: MP4, H.264 video + AAC stereo audio (32 kHz), muxed together.
 """
@@ -55,7 +56,8 @@ alone. In the prompt they are `<Picture 1>`..., `<Video 1>`... and `<Audio 1>`, 
 each kind counted on its own.
 
 **Length.** `duration_seconds` / `num_frames` (default 124 frames, 5.17 s), or
-`match_audio_duration: true` to make the video as long as the audio (5.17 to 14.4 s).
+`match_audio_duration: true` to make the video as long as the audio, rounded up to the next 17*n+5
+frames. There is no minimum length; outside the documented 5.17 to 14.4 s is experimental.
 
 **Canvas.** References do not set the output's shape: the default is 16:9 (1344x768). Use
 `orientation` or `height` + `width` for anything else.

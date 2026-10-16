@@ -50,7 +50,7 @@ Usage:
         --work-dir DIR --prompt=TEXT \\
         [--first-frame FILE] [--last-frame FILE] \\
         [--reference-image FILE ...] [--reference-video FILE ...] [--reference-audio FILE] \\
-        [--height N --width N] [--num-frames N | --match-audio-duration] \\
+        [--height N --width N] [--num-frames N | --match-audio-duration] [--max-seconds S] \\
         [--steps N] [--seed N] [--attention-backend NAME]
 
 --prompt is passed as `--prompt=value` (not `--prompt value`) so a value starting
@@ -62,8 +62,12 @@ There is no prompt rewriting: the text goes to the encoder exactly as given.
 request into the structured prompt format; that model is not in the open release.
 Write the structured prompt yourself -- see gateway/services/h3/GUIDE.md.)
 
-Frames: 24 fps, always 17 * n + 5 frames, between 124 (5.17 s) and 345 (14.4 s). A
---num-frames outside that grid is rounded up to it and clamped. --height and
+Frames: 24 fps, always 17 * n + 5 frames. A --num-frames (or an audio-derived length)
+off that grid is rounded up to it; there is no minimum or maximum. The model
+is documented for 5-15 s, so anything outside that is EXPERIMENTAL and diffusers'
+own 5-15 s check is switched off (see `allow_any_length`). --max-seconds, when given,
+is the only ceiling: a --match-audio-duration clip longer than it fails with an
+ERROR instead of holding the GPUs. --height and
 --width go together and must be multiples of 32. Without them the canvas is the
 model's own 768-short-edge 16:9 (1344x768), or, for fl2va, the aspect ratio of the
 first keyframe.
@@ -85,12 +89,11 @@ import traceback
 from pathlib import Path
 
 FPS = 24
-# The video VAE decodes 17 * n + 5 frames; the model generates between 5 and 15 seconds.
+# The video VAE decodes 17 * n + 5 frames. The model is documented for 5-15 seconds (124 to 345 frames), but
+# that window is no longer enforced here.
 FRAMES_PER_CHUNK = 17
 FRAMES_OFFSET = 5
-MIN_FRAMES = 124  # 5.17 s: the first 17 * n + 5 at or above 5 s (120 frames)
-MAX_FRAMES = 345  # 14.4 s: the last 17 * n + 5 at or below 15 s (360 frames)
-DEFAULT_FRAMES = 124
+DEFAULT_FRAMES = 124  # 5.17 s
 # The audio VAE's sample rate, used only for a reference whose own rate is unknown.
 AUDIO_SAMPLE_RATE = 32000
 
@@ -110,13 +113,36 @@ def log(tag: str, message: str) -> None:
 
 
 def snap_num_frames(num_frames: int) -> int:
-    """Round up to the next 17 * n + 5 the video VAE can decode, then keep the
-    result inside the 5-15 s window the model generates. (Same rule as
-    gateway/services/h3/video_shape.py -- the gateway cannot import this file.)"""
+    """Round up to the next 17 * n + 5 the video VAE can decode. No minimum or
+    maximum. (Same rule as gateway/services/h3/video_shape.py -- the gateway
+    cannot import this file.)"""
     snapped = max(num_frames, 1)
     while snapped % FRAMES_PER_CHUNK != FRAMES_OFFSET:
         snapped += 1
-    return min(max(snapped, MIN_FRAMES), MAX_FRAMES)
+    return snapped
+
+
+def allow_any_length() -> None:
+    """Switch off diffusers' own 5-15 s check.
+
+    Both the ref2va conditioning step (before_encoder.py) and the denoising setup
+    (before_denoise.py) raise a ValueError when the video's duration is outside
+    `components.min_duration` .. `components.max_duration`, which are properties of
+    MiniMaxH3ModularPipeline. They are overridden on the class, so this must run in
+    every process that builds a pipeline (the conditioning child and the parent)."""
+    from diffusers.modular_pipelines.minimax_h3.modular_pipeline import MiniMaxH3ModularPipeline
+
+    MiniMaxH3ModularPipeline.min_duration = property(lambda self: 0.0)
+    MiniMaxH3ModularPipeline.max_duration = property(lambda self: float("inf"))
+    log("run", "length limits lifted: diffusers' 5-15 s check is off (outside that range is experimental)")
+
+
+def check_max_seconds(args: argparse.Namespace, seconds: float) -> None:
+    """The one remaining ceiling: --max-seconds, when given. `seconds` is the
+    requested length before rounding up onto the frame grid, so a request exactly
+    at the ceiling is not rejected for the few frames the rounding adds."""
+    if args.max_seconds is not None and seconds > args.max_seconds:
+        raise ValueError(f"The video would be {seconds:.1f} s, longer than the {args.max_seconds:g} s maximum this server allows.")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -137,8 +163,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--match-audio-duration",
         action="store_true",
-        help="ref2va: size the video to the reference audio (rounded onto the frame grid, clamped to 5-14.4 s).",
+        help="ref2va: size the video to the reference audio (rounded up onto the 17n+5 frame grid; no minimum).",
     )
+    p.add_argument("--max-seconds", type=float, help="Fail if the video would be longer than this. Default: no ceiling.")
     p.add_argument("--steps", type=int, help="Denoising steps. Default: the pipeline's own (50).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--attention-backend", help="A diffusers attention backend name for the transformer (default: diffusers' own).")
@@ -155,6 +182,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.error(f"Model directory not found: {args.model_dir}")
     if args.steps is not None and args.steps < 1:
         p.error("--steps must be at least 1.")
+    if args.max_seconds is not None and args.max_seconds <= 0:
+        p.error("--max-seconds must be positive.")
 
     keyframes = [path for path in (args.first_frame, args.last_frame) if path is not None]
     references = [*args.reference_image, *args.reference_video, *([args.reference_audio] if args.reference_audio else [])]
@@ -288,6 +317,7 @@ def conditioning_inputs(args: argparse.Namespace) -> dict:
         inputs["references"], audio = load_references(args)
         if args.match_audio_duration:
             seconds = audio.audio.shape[-1] / (audio.sample_rate or AUDIO_SAMPLE_RATE)
+            check_max_seconds(args, seconds)
             inputs["num_frames"] = snap_num_frames(round(seconds * FPS))
             log("condition", f"--match-audio-duration: {seconds:.2f} s of audio -> {inputs['num_frames']} frames")
         else:
@@ -300,6 +330,7 @@ def run_condition_stage(args: argparse.Namespace) -> int:
 
     error_file = args.handoff.with_name(HANDOFF_ERROR_NAME)
     try:
+        allow_any_length()
         blocks, _ = split_workflow(args.model_dir, args.workflow)
         inputs = conditioning_inputs(args)
         log("condition", "loading the text/vision encoder")
@@ -384,6 +415,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
         import torch
         from diffusers.utils.export_utils import encode_video
 
+        allow_any_length()
         _, rest_blocks = split_workflow(args.model_dir, args.workflow)
         log("run", "loading the transformer and VAEs (while the encoder loads in the other process)")
         pipeline, seconds = make_pipeline(rest_blocks, args.model_dir, "cuda:0")

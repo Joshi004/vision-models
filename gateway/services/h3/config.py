@@ -39,19 +39,23 @@ MODEL_DIR = Path(os.environ.get("H3_MODEL_DIR", str(common_config.WEIGHTS_DIR / 
 RUN_PIPELINE_JOB_SCRIPT = common_config.MODEL_API_DIR / "common" / "run_pipeline_job.py"
 
 # ---------------------------------------------------------------------------
-# Video shape. All fixed by the released model (diffusers' MiniMax-H3 docs):
-# 24 fps; frame counts are 17 * n + 5 (what the video VAE decodes); 5 to 15
-# seconds, which on that grid means 124 (5.17 s) to 345 (14.4 s) frames; a
-# 768-pixel short edge, with the area capped at 768 x 1344.
+# Video shape. Fixed by the released model (diffusers' MiniMax-H3 docs): 24 fps;
+# frame counts are 17 * n + 5 (what the video VAE decodes); a 768-pixel short
+# edge, with the area capped at 768 x 1344.
+#
+# The model is documented for 5 to 15 seconds (124 to 345 frames on that grid),
+# but that window is NO LONGER ENFORCED: any length is rounded up to the next
+# 17 * n + 5 frames, and the runner switches off diffusers' own 5-15 s check
+# (run_h3.py::allow_any_length). Outside 5-15 s is EXPERIMENTAL: quality is
+# unknown and long clips may run out of GPU memory. The only remaining ceiling
+# is MAX_DURATION_SECONDS, a safety guard so one request cannot hold two GPUs
+# for hours; raise it with H3_MAX_SECONDS.
 # ---------------------------------------------------------------------------
 FPS = 24
 FRAMES_PER_CHUNK = 17
 FRAMES_OFFSET = 5
-MIN_FRAMES = 124
-MAX_FRAMES = 345
 DEFAULT_FRAMES = 124
-MIN_DURATION_SECONDS = 5.0
-MAX_DURATION_SECONDS = 15.0
+MAX_DURATION_SECONDS = float(os.environ.get("H3_MAX_SECONDS", "60"))
 
 LANDSCAPE_HEIGHT, LANDSCAPE_WIDTH = 768, 1344
 PORTRAIT_HEIGHT, PORTRAIT_WIDTH = 1344, 768

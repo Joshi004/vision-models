@@ -4,17 +4,23 @@
 //
 // H3's shape rules differ from LTX's (utils.js's defaultShape/toShapePayload),
 // so they are kept apart: no frame_rate (fixed 24 fps), sizes are multiples of
-// 32, lengths are 5-15 s on a 17*n+5 frame grid, and leaving the canvas alone is
+// 32, lengths are rounded up onto a 17*n+5 frame grid (5-15 s is the documented, no longer enforced, range), and leaving the canvas alone is
 // a real choice ("model default": H3's own 16:9, or the first frame's aspect
 // ratio) -- see H3ShapeMixin in services/h3/schemas.py, which these mirror.
 
 export const H3_MIN_SIDE = 256;
 export const H3_MAX_SIDE = 1536;
 export const H3_SIZE_MULTIPLE = 32;
-export const H3_MIN_SECONDS = 5;
-export const H3_MAX_SECONDS = 15;
-export const H3_MIN_FRAMES = 120;
-export const H3_MAX_FRAMES = 360;
+// The model is documented for 5-15 s (124-345 frames); anything outside that is
+// experimental, and the API no longer enforces it. The UI minimums are just the
+// smallest sensible inputs (the API takes any duration above 0 and any frame
+// count from 1). The maximums mirror the API's default ceiling (H3_MAX_SECONDS,
+// 60 s); an operator who changes it also has to change these.
+export const H3_MIN_SECONDS = 0.1;
+export const H3_MAX_SECONDS = 60;
+export const H3_MIN_FRAMES = 1;
+export const H3_MAX_FRAMES = 1440;
+export const H3_DOCUMENTED_RANGE = '5-15 s';
 
 export function defaultH3Shape() {
   return {

@@ -4,6 +4,14 @@ Dates are when a change shipped on this codebase, not necessarily when you're re
 `api_version` field (`GET /v1/guide?format=json`) is this server's own current version; compare it
 against what you last integrated against.
 
+- **0.13.1** (2026-10-16): MiniMax H3 (`/v1/h3/videos/generate`, `/v1/h3/videos/audio-to-video`) no longer limits the
+  video to 5 to 15 s. `duration_seconds` (now above 0 up to 60), `num_frames` (now 1 to 1440) and
+  `match_audio_duration` accept any length and only round it up to the next 17*n+5 frames, so a 1 s request gives 39
+  frames and `match_audio_duration` never cuts the audio. The 124 to 345 frame (5.17 to 14.4 s) range is what the model
+  is documented for: **outside it is experimental** -- quality is unknown, very short clips may fail, and long clips may
+  run out of GPU memory. With `match_audio_duration`, audio longer than 60 s fails the job (operator setting
+  `H3_MAX_SECONDS`). One behaviour change inside the old range: a 15 s request now gives 362 frames (15.08 s) instead of
+  being clamped to 345.
 - **0.13.0** (2026-10-14): Added a ninth backend, MiniMax H3 (open weights, bf16): `POST /v1/h3/videos/generate`
   (text, or a first and/or last frame, to video with generated stereo sound; `pipeline` `h3:generate`) and
   `POST /v1/h3/videos/audio-to-video` (an audio reference plus image and/or video references to video with

@@ -32,7 +32,7 @@ service adds two more models that are not in the open weights and therefore not 
 | Guidance | `negative_prompt` on some recipes | none -- the weights are guidance-distilled, one forward pass per step |
 | Resolution | up to 1920x1088 | 768 px short edge: 1344x768 landscape, 768x1344 portrait |
 | Frame rate | 24 (25 with `lip_sync`) | fixed 24 |
-| Length | up to ~20 s | 5.17 to 14.4 s (frame counts are 17*n+5) |
+| Length | up to ~20 s | any length, rounded up to 17*n+5 frames; 5.17 to 14.4 s is the documented range, outside it is experimental |
 | Cuts inside a clip | LTX-2.5: in prose | `[Shot N]` blocks with cut times |
 | Audio-to-video | your audio is muxed in unchanged | the audio is a **reference**; the model generates the soundtrack (section 5) |
 | `lip_sync` option | yes (TBDub) | no -- use `POST /v1/tbdub/videos/lip-sync` if you need your exact audio |
@@ -119,7 +119,10 @@ If you need your exact recording with the speaker's mouth matched to it, use `PO
 
 An audio reference is 2 to 15 seconds and never stands alone: it needs at least one image or video reference. Mono or
 stereo at any sample rate is accepted (it is resampled to 32 kHz). `match_audio_duration: true` makes the video as long
-as the audio (kept within 5.17 to 14.4 s).
+as the audio, rounded up to the next 17*n+5 frames. There is no minimum length, and the audio is not cut; the audio
+may not be longer than the server's ceiling (60 s by default). The model is documented for 5.17 to 14.4 s, so audio
+outside that range is experimental: very short clips may look or sound wrong or fail, and long ones may run out of GPU
+memory.
 
 ### 6. Job lifecycle, timing and resources
 

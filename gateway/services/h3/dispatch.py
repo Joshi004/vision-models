@@ -118,7 +118,8 @@ def build_audio_to_video_args(req: H3AudioToVideoRequest, output_path: Path, job
         args += ["--reference-video", str(path)]
     args += ["--reference-audio", str(audio_path)]
     if req.match_audio_duration:
-        args.append("--match-audio-duration")
+        # The audio is only decoded on the compute node, so the runner enforces the ceiling.
+        args += ["--match-audio-duration", "--max-seconds", str(config.MAX_DURATION_SECONDS)]
     return args
 
 

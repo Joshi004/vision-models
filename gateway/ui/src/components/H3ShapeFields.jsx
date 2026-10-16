@@ -2,7 +2,7 @@ import FieldLabel from './FieldLabel.jsx';
 import Input from './ui/Input.jsx';
 import Select from './ui/Select.jsx';
 import SegmentedControl from './ui/SegmentedControl.jsx';
-import { H3_MAX_FRAMES, H3_MAX_SECONDS, H3_MAX_SIDE, H3_MIN_FRAMES, H3_MIN_SECONDS, H3_MIN_SIDE, H3_SIZE_MULTIPLE } from '../h3.js';
+import { H3_DOCUMENTED_RANGE, H3_MAX_FRAMES, H3_MAX_SECONDS, H3_MAX_SIDE, H3_MIN_FRAMES, H3_MIN_SECONDS, H3_MIN_SIDE, H3_SIZE_MULTIPLE } from '../h3.js';
 
 // Canvas and length fields for the MiniMax H3 forms; the state shape and its
 // mapping to the API live in h3.js. Mirrors H3ShapeMixin
@@ -89,7 +89,7 @@ export default function H3ShapeFields({ model, shape, onChange, defaultCanvasHin
             type="number"
             min={H3_MIN_SECONDS}
             max={H3_MAX_SECONDS}
-            step="0.5"
+            step="0.1"
             value={shape.durationSeconds}
             onChange={(event) => patch({ durationSeconds: event.target.value })}
           />
@@ -108,9 +108,12 @@ export default function H3ShapeFields({ model, shape, onChange, defaultCanvasHin
         </FieldLabel>
       )}
       {shape.lengthMode === 'match' && (
-        <p className="text-xs text-muted">The video is as long as the audio reference, kept within 5.17 to 14.4 s.</p>
+        <p className="text-xs text-muted">The video is as long as the audio reference, rounded up to the next 17n+5 frames (no minimum).</p>
       )}
-      <p className="text-xs text-muted">Fixed 24 fps. Lengths are rounded up to the next 17n+5 frames and capped at 345 (14.4 s).</p>
+      <p className="text-xs text-muted">
+        Fixed 24 fps. Lengths are rounded up to the next 17n+5 frames. The model is documented for {H3_DOCUMENTED_RANGE} (124-345
+        frames); anything shorter or longer is experimental and may look wrong, fail, or run out of GPU memory.
+      </p>
     </div>
   );
 }

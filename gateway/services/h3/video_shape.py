@@ -1,10 +1,11 @@
 """Video shape helpers for H3: duration -> frame count, orientation -> canvas.
 
 H3 always runs at 24 fps and its video VAE decodes only frame counts of the form
-17 * n + 5, so a requested length is rounded up onto that grid and kept inside
-the 5-15 second window the model generates (which, on the grid, is 124 to 345
-frames). The runner (models/h3/runner/run_h3.py::snap_num_frames) applies the
-same rule on its side; the gateway cannot import that file.
+17 * n + 5, so a requested length is rounded up onto that grid. The model is
+documented for 5-15 seconds (124 to 345 frames) but that window is not enforced
+any more: shorter and longer clips are experimental. The runner
+(models/h3/runner/run_h3.py::snap_num_frames) applies the same rule on its
+side; the gateway cannot import that file.
 """
 
 from __future__ import annotations
@@ -13,11 +14,12 @@ from services.h3 import config
 
 
 def snap_frames(frames: int) -> int:
-    """Round up to the next 17 * n + 5, then clamp to [MIN_FRAMES, MAX_FRAMES]."""
+    """Round up to the next 17 * n + 5. No minimum or maximum: the request
+    schemas bound the length (config.MAX_DURATION_SECONDS)."""
     snapped = max(frames, 1)
     while snapped % config.FRAMES_PER_CHUNK != config.FRAMES_OFFSET:
         snapped += 1
-    return min(max(snapped, config.MIN_FRAMES), config.MAX_FRAMES)
+    return snapped
 
 
 def resolve_num_frames(duration_seconds: float | None, num_frames: int | None) -> int:
