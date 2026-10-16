@@ -422,3 +422,102 @@ External sources (checked 2026-10-11/12, re-verify before trusting long-term):
 - [MoEE paper, CVPR 2025](https://openaccess.thecvf.com/content/CVPR2025/papers/Liu_MoEE_Mixture_of_Emotion_Experts_for_Audio-Driven_Portrait_Animation_CVPR_2025_paper.pdf)
 - Various 2026 open-source lip-sync model roundups (Instavar, Tomodahinata, Creeta, WIDER-lipSync
   comparison) for the MuseTalk/Wav2Lip/LatentSync resolution/VRAM/license table in §6
+
+---
+
+## 10. Addendum (2026-10-12): newer models, and the decision taken
+
+_Written after §1-§9, once the open-weight field was surveyed again and the choice was made. §6's ranking
+(LatentSync best of the dedicated lip-sync passes) is superseded by the table below._
+
+### 10.1 Newer open-weight video-to-video dubbing models
+
+Found after §6 was written (checked 2026-10-12). All take an existing video plus an audio track and keep the audio
+exactly as given. The speed and human-rating columns are **the TBDub authors' own benchmark** (38 TalkVid clips,
+3 raters, one NVIDIA H20 at 512x512; [arXiv:2609.06144](https://arxiv.org/abs/2609.06144)) -- not independent, and
+not measured on this cluster. Ratings are 0-5.
+
+| Model | Approach | Lip-sync rating | Visual-quality rating | Speed (frames/s, H20) | VRAM | License |
+|---|---|---|---|---|---|---|
+| **TBDub 30-step (Teacher)** | mask-free video editor, Wan2.2-5B base | 3.71 | 3.78 | 0.51 | ~20 GB with CPU offload | Apache-2.0 |
+| TBDub 2-step (Student) | same, distilled | 3.85 | 3.80 | 7.13 | ~15 GB with offload | Apache-2.0 |
+| X-Dub (public 5B) | mask-free video editor | 3.57 | 2.88 | 0.51 | ~21 GB | Apache-2.0 |
+| KeySync | masked, two-stage | 2.75 | 2.33 | 1.05 | not published | Apache-2.0 |
+| Lip Forcing 14B | masked, Wan2.1-14B | 2.18 | 2.52 | 2.83 | ~37 GB (~50 with text encoder) | Apache-2.0 |
+| LatentSync 1.6 | masked, Stable Diffusion U-Net | 1.91 | 1.87 | 1.31 | ~18 GB | Apache-2.0 (GitHub) / openrail++ (HF card) |
+
+LatentSync wins on automatic reconstruction metrics only because it changes the mouth the least; human raters put it
+last on lip sync. Treat all of this as a strong hint, not a verdict: the pilot in §9 step 2 on this project's own
+footage is still the real test.
+
+### 10.2 Decision
+
+**TBDub, 30-step Teacher** (absolute quality was the stated priority). Built as (1) a `lip_sync` option on both LTX
+audio-to-video endpoints, run as a second step of the same Slurm job on the same GPU, and (2) a standalone
+`POST /v1/tbdub/videos/lip-sync`. See `docs/models/tbdub/README.md` and `docs/status.md`.
+
+### 10.3 What reading TBDub's code settled (and one correction)
+
+- **No prompt.** It passes an empty text prompt and a precomputed "empty" embedding; the text pathway exists only
+  because the Wan backbone expects one. The real controls are `audio_cfg_scale` ("follow the voice"),
+  `ref_cfg_scale` ("stay like the original"), the seed and the step count.
+- **It edits speech motion, not expression.** It re-renders the whole face crop, but it was trained on pairs that
+  differ only in lip motion, so it changes lips, teeth, jaw and the nearby cheeks and chin, and copies eyes, brows,
+  head pose and expression from the input. Laughter, raised eyebrows and nods must already be in the video (for LTX:
+  in the prompt). Laughter in the *audio* will most likely come out as ordinary talking mouth shapes (inference from
+  how it was trained, not tested).
+- **Correction to an earlier statement:** the shipped `config.json` uses `ref_cfg_scale` 2.0 and `audio_cfg_scale` 6.0,
+  the same as the code's own defaults -- it does not override them. (The paper's benchmark used 2.5 and 10.)
+- **Traps the integration handles:** it assumes 25 fps and never checks; it fills a video shorter than the audio by
+  playing it backwards; it calls a bare `ffmpeg`; it fails when no face is found for more than 0.4 s; it tracks one
+  face only; and its own output muxes the audio as 16 kHz mono AAC (the integration re-muxes the original-quality audio).
+
+### 10.4 What the first real runs showed
+
+- §1.3's worry is settled: LTX-2.5 audio-to-video does run end to end on this cluster (four jobs on 2026-10-12, then
+  two more with lip sync), about 10 minutes for a 5 s clip when warm.
+- The integration works as designed on real GPUs (standalone, LTX-2.3 and LTX-2.5 with `lip_sync`, a real fallback,
+  `source_job_id` retry, purge): numbers and details in `docs/status.md` (TBDub section).
+- Quality, honestly: the mouth is cleaner and follows the audio's bursts, but on a clip where the speaker holds a broad
+  smile the articulation stays subtle (TBDub keeps the source expression). `ref_cfg_scale` 1 gave visibly more mouth
+  change; `audio_cfg_scale` 10 alone did not. The side-by-side pilot recommended in §9 step 2 is still the way to
+  judge it on your own footage; the videos from this test are in `/home/naresh/vision-data-lipsync-test/review/`.
+
+---
+
+## 11. Addendum (2026-10-14): MiniMax H3's audio handling, and a correction
+
+_Written while integrating MiniMax H3 (`docs/models/h3/README.md`), after reading diffusers' H3 source and MiniMax's own
+reference-mode prompt guide. It corrects how H3's audio input was first summarized in the planning discussion._
+
+**What was said then:** that H3 treats an uploaded audio clip as a *voice-timbre reference* only, generating new dialogue in
+a similar voice, like LTX Dub-It (§5). That came from third-party example prompts, which all happened to mark the audio as a
+timbre reference.
+
+**What the source and MiniMax's guide show:**
+
+- In H3's reference mode (`ref2va`) an audio reference never reaches the Qwen3-VL conditioner. It is encoded by the audio VAE
+  alone into clean conditioning rows of the packed sequence, next to the noisy video and audio rows the model generates; a
+  reference *video's* own soundtrack is read as well.
+- How the model should use it is **written in the prompt**. MiniMax's guide defines relationship markers for audio:
+  `fully_copy` (the complete source audio serves as the target video's complete final audio track), `partially_copy`,
+  `reference` (only timbre, rhythm, music style or dialogue content is referenced, not copied) and `weak_reference`. The
+  guide's own examples include "reused 1:1 as the target video's complete final audio track".
+- So H3 can *reproduce* a reference recording as the soundtrack, not only imitate its voice -- but it does so **through the
+  model**: audio VAE in, generative model, audio VAE out. The result is the model's rendition, not a muxed copy. How close a
+  `fully_copy` is to the original has not been measured on this cluster.
+
+**Where that leaves the §8 table.** H3's reference mode is a fourth kind of thing next to Dub-It, a lip-sync pass and an
+avatar model: image/video/audio references in, video and soundtrack out, **audio kept approximately, lips and expression
+generated together with it**. It is therefore closer to "the same voice, and possibly the same words, with matching lips and
+real emotion in one pass" than to Dub-It, but it still does not give a bit-exact recording. Concretely:
+
+| Requirement | Still the right tool |
+|---|---|
+| My exact recording, bit for bit, with the mouth matched to it | TBDub (§10): LTX audio-to-video with `lip_sync`, or `POST /v1/tbdub/videos/lip-sync` |
+| The same character voice across shots, words typed per shot | H3 reference mode, `reference` marker, the same recording as `<Audio 1>` every time |
+| My recording reproduced closely as the soundtrack, in one pass | H3 reference mode, `fully_copy` marker -- worth a listening test before relying on it |
+
+**Not built, possible follow-ups:** letting `POST /v1/tbdub/videos/lip-sync` take an H3 job as `source_job_id` (today only LTX
+audio-to-video jobs are accepted; an H3 result can be uploaded instead -- TBDub's standalone endpoint converts any frame rate
+to 25 fps); and the listening test above on the first real H3 jobs.

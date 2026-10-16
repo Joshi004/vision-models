@@ -67,18 +67,41 @@ same weights in `FL2VA/` and `Ref2VA/`, 290 GB more; the download script skips i
 
 The text encoder and the transformer are each about 62 GiB, so one 80 GB card cannot hold both. Each job reserves **two
 H100s on one node** (`--nodes=1 --gres=gpu:2`) and `models/h3/runner/run_h3.py` splits the workflow the way diffusers' own
-documentation does for "two cards, nothing offloaded":
+documentation does for "two cards, nothing offloaded", then uses the second card a second time for denoising. How is the
+operator setting **`H3_PARALLELISM`** (`gateway/run.sh`, read when the gateway starts; the gateway passes it to every job as
+`--parallelism`):
+
+- **`auto` (default): the mode is chosen per request from the video's length.** Up to 10 s (243 frames, which is what a 10 s
+  request rounds up to) uses `ulysses`, anything longer uses `split`. A `--match-audio-duration` request is sized from the
+  audio's length, read from the file's header. If that length cannot be read, `split` is used. The choice is logged as
+  `parallelism auto: ... -> ulysses|split`.
+- **`ulysses`: both GPUs compute every denoising step.** Each holds the whole transformer and runs half of the token
+  sequence through every block; around each attention layer the two exchange their halves of the queries, keys and values.
+- **`split`: the blocks are divided between the GPUs and run one after another.** Slower, but each GPU holds only half of the
+  weights, so far more memory is left for activations. The fallback if `ulysses` runs a job out of memory.
 
 ```
-Slurm job (2 GPUs)  ->  run_h3.py (GPU a: generation)
+Slurm job (2 GPUs)  ->  run_h3.py (rank 0, GPU a: generation)
                           |-- spawns child run_h3.py --stage condition (GPU b: conditioning)
                           |      before_encode -> text_encoder           loads ~62 GiB encoder
                           |      writes work/h3_conditioning.pt, exits
+                          |-- ulysses only: spawns run_h3.py --stage denoise-worker (rank 1, will take GPU b)
+                          |      imports, then waits for rank 0 to open a localhost rendezvous store
                           |-- loads transformer(_ref) + VAEs             loads ~77 GB, at the same time
                           |-- waits for the child (it exits, GPU b is free), reads the handoff
+                          |
+                          |  --parallelism split
                           |-- moves transformer blocks 25-49 (~31 GiB) onto GPU b
                           '-- vae_encoder -> denoise (N steps; blocks 0-24 on GPU a, 25-49 on GPU b)
                                           -> decode -> MP4 (PyAV)
+                          |
+                          |  --parallelism ulysses
+                          |-- vae_encoder (references/keyframes) on GPU a, VAEs to host RAM,
+                          |     encoded latents written to work/h3_encoded.pt
+                          |-- opens the store + NCCL group; the worker joins and takes GPU b
+                          |-- copies the whole transformer GPU a -> GPU b over NCCL (nothing is read from disk again)
+                          |-- both ranks: denoise (N steps), each on half of the token sequence, same seed
+                          |-- worker exits; rank 0 moves the transformer to host RAM, decodes on GPU a -> MP4 (PyAV)
 ```
 
 - The conditioning half's outputs are exactly the inputs the rest reads by name (checked against diffusers' block graph on
@@ -96,8 +119,34 @@ Slurm job (2 GPUs)  ->  run_h3.py (GPU a: generation)
 - The VAEs leave the generation GPU when denoising starts. The offload manager only makes room for a model's weights,
   never for activations, so with the transformer (61.7 GiB) and both VAEs (10.3 GiB) resident, the first audio-to-video
   jobs ran out of memory on the first denoising step even at 124 frames (generate jobs fit, peaking at 75 GiB). The
-  runner moves both VAEs to host RAM at the first transformer step; their offload hooks bring them back for the decode.
-- **The transformer is split across both GPUs for denoising.** With all 61.7 GiB on one card, a 345-frame 1344x768 clip
+  runner moves both VAEs to host RAM at the first transformer step (`split`) or right after the references are encoded
+  (`ulysses`); their offload hooks bring them back for the decode.
+- **`ulysses`: how the two ranks work together.**
+  - *Context parallelism.* diffusers' `MiniMaxH3Transformer3DModel` already declares how to split its packed sequence
+    (`_cp_plan`): the hidden states, the rotary table and the per-row indices are split in two at the first block, and the
+    two output heads gather the sequence back, so both ranks see the full prediction every step and run the (cheap)
+    scheduler step themselves. `enable_parallelism(ContextParallelConfig(ulysses_degree=2, ulysses_anything=True))` is
+    called on both ranks; `ulysses_anything` because the packed sequence has whatever length the request makes it. The
+    attention backend (`_flash_3_hub` by default) must support it, and does. The two-layer text refiner runs before the
+    split, on text both ranks hold in full, so the runner switches the exchange off for it only
+    (`enable_parallel_denoiser`).
+  - *Inputs.* Both ranks start from identical inputs: the conditioning handoff, plus the encoded reference/keyframe latents
+    rank 0 writes to `work/h3_encoded.pt` (large reference videos would be slow and memory-hungry to push through a GPU
+    collective, and a file is what the conditioning handoff already uses). Each rank draws its noise from its own generator
+    seeded with `--seed`, so the noise is identical.
+  - *Weights.* The worker builds the transformer without weights (meta device) and receives every parameter and buffer from
+    rank 0 over NCCL, shapes and dtypes included (the checkpoint is mixed precision). Expected to take seconds to tens of
+    seconds depending on the GPU link (**not measured yet**: the runner logs `transformer copied to the second GPU in ...s`),
+    where reading 61.7 GiB from shared storage again took 5-11 min.
+  - *Order of events.* The worker is started with the encoder so its imports are done early, but it touches no GPU until
+    rank 0 opens the rendezvous store, which happens only after the encoder has exited and the references are encoded;
+    until then GPU b is the encoder's. `NCCL_NVLS_ENABLE=0` is set for the job to save NCCL buffer memory.
+  - *Failure handling.* A thread in rank 0 watches the worker: if it dies, rank 0 prints the worker's error as the last
+    line (`ERROR: the second denoising process failed: ...`) and stops at once instead of waiting for a GPU operation to
+    time out (10 min). A failure on rank 0 kills the worker.
+  - *Decode.* Rank 0 moves its transformer to host RAM (about 62 GiB, logged), so the VAEs get the GPU back, and decodes
+    alone. The worker has exited by then.
+- **`split`: the transformer is split across both GPUs for denoising.** With all 61.7 GiB on one card, a 345-frame 1344x768 clip
   (about 103k video tokens) ran out of memory in the first denoising step: the feed-forward layer alone briefly needs
   12-13 GiB for that sequence, and the 79 GiB card had about 17 GiB left. The conditioning GPU is idle once the encoder's
   process has exited, so `split_transformer` in `run_h3.py` moves blocks 25-49 of the 50 onto it (`SPLIT_AT`). Each GPU then
@@ -124,7 +173,10 @@ and writes the MP4). The upstream code is not vendored: it is the installed diff
 `models/h3/runner/run_h3.py`.
 
 Operator settings (environment variables of the gateway process, see `gateway/run.sh`): `H3_MODEL_DIR`, `H3_MEM_PER_GPU`
-(112G, so 224G for the job), `H3_CPUS` (16 in total), `H3_API_TIME` (01:30:00), and `H3_ATTENTION_BACKEND` (unset).
+(112G, so 224G for the job), `H3_CPUS` (16 in total), `H3_API_TIME` (01:30:00), `H3_ATTENTION_BACKEND` (`_flash_3_hub` when
+started with `gateway/run.sh`), and `H3_PARALLELISM` (`auto`, the default; `ulysses` or `split` force that mode for every request).
+`H3_PARALLELISM` is read when the gateway starts: every request sent after a restart follows it, and a
+restart with `H3_PARALLELISM=split gateway/run.sh` (or `=ulysses`) starts the gateway in that mode.
 
 ## Things the wrapper does because diffusers' recipe does not
 
@@ -136,6 +188,8 @@ Operator settings (environment variables of the gateway process, see `gateway/ru
 | Weights missing or half downloaded | Fails first with "weights are incomplete ... run models/h3/download_weights.sh" instead of an obscure loader error |
 | The handoff holds processed copies of the request's reference media | Deletes it (and the scratch folder) when the run ends, success or not |
 | A failed conditioning half | The parent reads its error file and prints `ERROR: conditioning step failed: ...` as the last line, which is what the job status shows |
+| `ulysses`: the second denoising process dies while rank 0 waits on it inside a GPU operation | A watcher thread in the parent prints `ERROR: the second denoising process failed: ...` (the worker's own error) as the last line and stops at once, instead of waiting out the 10 min GPU-operation timeout |
+| A bad `H3_PARALLELISM` value | `gateway/run.sh` and `gateway/services/h3/config.py` refuse to start the gateway with it, so it never becomes a failure in every job |
 
 ## Limits
 
@@ -157,9 +211,11 @@ TBDub):
 | | To record |
 |---|---|
 | Load time, conditioning half / generation half | printed in the job's `run.log` (`loaded in ...s`) |
-| Peak GPU memory, each GPU | the conditioning half prints its own peak; the generation half prints `peak GPU memory since the split: generation GPU ..., second GPU ...` (counted from after the transformer is split, so the earlier full load does not count) |
-| Peak host RAM | from `sacct`/`seff` (expected ~134 GiB, about 144 GB, while both halves load) |
-| Denoising time, 1344x768, 124 frames and 345 frames | `generated N frames ... in ...s` |
+| Peak GPU memory, each GPU | the conditioning half prints its own peak. `split`: the generation half prints `peak GPU memory since the split: generation GPU ..., second GPU ...` (counted from after the transformer is split, so the earlier full load does not count). `ulysses`: `peak GPU memory during denoising: generation GPU ..., second GPU ...` (counted from the start of denoising; the worker prints its own too, tagged `denoise-worker`) |
+| Peak host RAM | from `sacct`/`seff` (expected ~134 GiB, about 144 GB, while both halves load; `ulysses` adds ~62 GiB when rank 0 moves its transformer off the GPU for the decode, after the encoder is long gone) |
+| Denoising time, 1344x768, 124 frames and 345 frames | `split`: `generated N frames ... in ...s`. `ulysses`: `denoised in ...s` (then `decoded N frames ... in ...s`). Compare the two modes on the same request and seed |
+| `ulysses`: weight copy and GPU link | `transformer copied to the second GPU in ...s`; `nvidia-smi topo -m` inside a job shows whether the GPUs share NVLink |
+| `ulysses`: decode handover | `transformer moved off the GPU for the decode in ...s` |
 | Whole job, cold | Slurm run time; this replaces `TYPICAL_RUN_SECONDS` (20 min, a guess) and `H3_API_TIME` |
 | `fully_copy` fidelity | listen: is the reference audio reproduced closely, or only its voice? |
 | Attention backend | try `H3_ATTENTION_BACKEND=_flash_3_hub` (diffusers: ~3x faster on Hopper) -- see below |
@@ -173,6 +229,15 @@ TBDub):
   time for 345 frames at 1344x768, and for 124 frames to compare with the earlier ~710 s. If a job still runs out of memory,
   retry with a smaller canvas (960x544 is the documented speed lever) or a shorter clip; the next step would be group
   offloading, which is not wired in.
+- **`ulysses` has NOT been run to completion yet; `auto` uses it for videos up to 10 s.** A 328-frame job (13 s, 768x1344) ran
+  out of memory on the first GPU in ulysses mode, which is why longer videos go to `split` under `auto`. Whether 243 frames
+  fits with room to spare is expected, not measured. It trades memory for speed: each GPU holds all 61.7 GiB, which leaves
+  about 17 GiB for activations of half the tokens (plus NCCL buffers). Expected, not measured: it fits a plain 345-frame
+  1344x768 clip with a few GiB to spare, and it is the **long clips, large canvases and many references** that can run out of
+  memory (the reference tokens are part of the same sequence). Read both `peak GPU memory during denoising` figures, and if a
+  job runs out of memory restart the gateway with `H3_PARALLELISM=split`. The VAE-encode step still runs next to the whole
+  transformer (about 72 GiB), as it did before the block split; reference videos make it heavier. Also unmeasured: the speedup
+  itself (expected 1.6-1.9x on denoising, from published two-GPU results for video transformers, not from this cluster).
 - **Host RAM:** both halves hold their weights in RAM while loading. If a job is killed for memory, raise `H3_MEM_PER_GPU`.
 - **`_flash_3_hub` offline:** the kernel is fetched from the Hub by the `kernels` package, which is not in the environment, and
   jobs run with `HF_HUB_OFFLINE=1`. Untested sketch: `uv pip install kernels` into `envs/h3`, then on a node with internet run

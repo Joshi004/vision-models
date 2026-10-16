@@ -77,6 +77,8 @@ def _common_args(req, *, workflow: str, output_path: Path, job_dir: Path, num_fr
         args += ["--steps", str(req.num_inference_steps)]
     if config.ATTENTION_BACKEND:
         args += ["--attention-backend", config.ATTENTION_BACKEND]
+    # Always passed, so every request follows the operator's setting (run_h3.py's own default is the same).
+    args += ["--parallelism", config.PARALLELISM]
     return args
 
 

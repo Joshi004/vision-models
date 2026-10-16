@@ -61,6 +61,13 @@
 #                                                      default instead. Needs the `kernels` package in envs/h3 and the
 #                                                      flash-attn3 kernel in the Hugging Face cache, because jobs run offline;
 #                                                      see docs/models/h3/README.md)
+#   H3_PARALLELISM                                    (how an H3 job's two GPUs share the denoising; default auto = ulysses for a video of
+#                                                      up to 10 s, split for a longer one, decided per request. ulysses = both GPUs
+#                                                      compute every step, each on half of the token sequence, each holding the whole
+#                                                      transformer. split = the transformer's blocks are divided between the GPUs:
+#                                                      slower, but ~45 GiB per GPU left for activations rather than ~17 GiB. Set
+#                                                      ulysses or split to force that mode for every request. Read when the gateway
+#                                                      starts, so restart the gateway to change it)
 set -euo pipefail
 
 API_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -73,6 +80,12 @@ THIS_NODE="$(hostname)"
 NODE_FILE="$DATA_DIR/gateway.host"
 # `-` (not `:-`): unset -> FlashAttention-3; set but empty -> diffusers' default backend.
 H3_ATTENTION_BACKEND="${H3_ATTENTION_BACKEND-_flash_3_hub}"
+# Unset or empty -> auto. Checked here so a typo fails now, not in every H3 job.
+H3_PARALLELISM="${H3_PARALLELISM:-auto}"
+case "$H3_PARALLELISM" in
+  auto|ulysses|split) ;;
+  *) echo "ERROR: H3_PARALLELISM must be 'auto', 'ulysses' or 'split', got '$H3_PARALLELISM'." >&2; exit 1 ;;
+esac
 
 if [ -n "${MODEL_API_PORT:-}" ] && [ "$MODEL_API_PORT" != "$PORT" ]; then
   echo "Note: ignoring MODEL_API_PORT=$MODEL_API_PORT -- the gateway always runs on port $PORT."
@@ -143,7 +156,7 @@ fi
 
 # 3. Start, then wait for the health check.
 tmux new-session -d -s "$SESSION" \
-  "export VISION_DATA_DIR='$DATA_DIR'; export H3_ATTENTION_BACKEND=$(printf '%q' "$H3_ATTENTION_BACKEND"); cd '$API_DIR' && '$DATA_DIR/envs/gateway/bin/uvicorn' server:app --host '$HOST' --port $PORT; exec bash"
+  "export VISION_DATA_DIR='$DATA_DIR'; export H3_ATTENTION_BACKEND=$(printf '%q' "$H3_ATTENTION_BACKEND"); export H3_PARALLELISM=$(printf '%q' "$H3_PARALLELISM"); cd '$API_DIR' && '$DATA_DIR/envs/gateway/bin/uvicorn' server:app --host '$HOST' --port $PORT; exec bash"
 echo "$THIS_NODE $PORT" > "$NODE_FILE"
 
 echo -n "Starting on $THIS_NODE:$PORT "
@@ -162,6 +175,7 @@ fi
 
 echo "Running:  $HEALTH"
 echo "H3 attention backend: ${H3_ATTENTION_BACKEND:-default (diffusers)}"
+echo "H3 parallelism:       $H3_PARALLELISM"
 echo "Node:     $THIS_NODE   (forward port $PORT from THIS node)"
 echo "Tunnel:   ssh -N -L $PORT:localhost:$PORT <you>@$THIS_NODE   (or let Cursor/VS Code forward port $PORT)"
 echo "Attach:   tmux attach -t $SESSION   (Ctrl-b d to detach without stopping it)"

@@ -198,3 +198,50 @@ validate the "no independent reviews yet" gap than trusting the model card alone
 4. Keep LTX-2.3's own API (already built) as the fallback/building block regardless
    — JoyAI-Echo is literally built on it, so nothing from that work is wasted either
    way.
+
+---
+
+## 7. Addendum (2026-10-14): MiniMax H3, and the decision taken
+
+_Written after §1-§6, when LTX output quality became the concern and MiniMax H3 (released 2026-07-31, open weights
+2026-08) was evaluated. §2 and §5 did not cover it. Everything below is third-party or read from source; none of it is
+measured on this cluster._
+
+**Not to be confused with Hailuo-02.** MiniMax's earlier `MiniMax-Hailuo-02` is hosted-API-only (no weights, silent video).
+H3 ("Hailuo 3") is a different model with open weights and native sound; only H3 can run here.
+
+### 7.1 The quality case
+
+[Artificial Analysis'](https://artificialanalysis.ai/video/leaderboard/text-to-video/open-weights) blind-vote Elo (text-to-video
+with audio, checked 2026-10-12/13, so the same caveats as §2's leaderboard paragraph):
+
+| Model (open weights) | Elo |
+|---|---|
+| **MiniMax H3 (768p)** | **1140** (4th of all models) |
+| LTX-2.5 Fast | 948 (22nd of all) |
+| LTX-2.5 Pro | 945 (24th of all) |
+| LTX-2.3 Pro / Fast | 895 / 859 |
+
+Independent hands-on comparisons (Virse, Pixomi, AI Creative Log, CriticaTV) agree on the pattern: **H3 is better at physics and
+contact, object interaction, complex motion (LTX showed extra limbs and body distortion on dance prompts), camera logic, and
+keeping a face on-model across a clip; LTX-2.5 is better at resolution (up to 4K), speed (reported 7-14x faster), simple or
+static scenes, keeping a product label square to camera, and native multi-shot in one generation.** So it is a trade, not a
+replacement.
+
+### 7.2 What it costs
+
+- **Two GPUs per job:** the Qwen3-VL-32B encoder (62 GiB) and the 33B transformer (61.7 GiB) cannot share one 80 GB card
+  (MiniMax's own validated recipe is 4x H100 or 8x B200; diffusers documents a two-card split).
+- **210 GB of weights** (144 GB read per job) against LTX-2.5's 116 GB.
+- **768p, 24 fps, 5.17-14.4 s** from the open weights; the 2K pass is hosted-only.
+- **No prompt rewriting in the open release** (Context-IR is hosted-only): the caller has to write H3's structured prompt.
+- **License:** not licensed for use or hosting in the US, EU, UK or South Korea without MiniMax's authorization (the deployment
+  is elsewhere).
+
+### 7.3 Decision
+
+H3 was **built beside LTX, not instead of it**: `POST /v1/h3/videos/generate` and `/v1/h3/videos/audio-to-video`, full bf16
+through diffusers 0.41's own pipeline, two GPUs per job (`docs/models/h3/README.md`, `docs/status.md`). Which model to use per
+shot is a human call until real runs exist. The §1 finding is unchanged: nothing here makes a one-minute video from one
+prompt; that remains a pipeline problem on top of whichever clip model is used. For lip sync with the exact audio, see
+`LIP_SYNC_RESEARCH.md` §11 -- H3's audio input is a reference the model reads, not audio it muxes through.
