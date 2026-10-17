@@ -8,6 +8,11 @@
 // activates the *first* control nested inside it, so wrapping several
 // radios in one outer label would make clicking a heading jump to
 // whichever option happens to be first).
+//
+// Each option's <label> must stay `relative`: the radio inside is `sr-only`
+// (absolutely positioned), and without a positioned ancestor inside <main>'s
+// scroll area, focusing it on click scrolls the whole window instead,
+// showing blank space below the full-height app shell (see App.jsx).
 export default function SegmentedControl({ name, value, onChange, options }) {
   return (
     <div className="inline-flex flex-wrap gap-1 rounded-md border border-border bg-surface p-1" role="radiogroup">
@@ -16,7 +21,7 @@ export default function SegmentedControl({ name, value, onChange, options }) {
         return (
           <label
             key={option.value}
-            className={`cursor-pointer rounded-[6px] px-3 py-1.5 text-sm transition-colors ${
+            className={`relative cursor-pointer rounded-[6px] px-3 py-1.5 text-sm transition-colors ${
               checked ? 'bg-accent text-white' : 'text-muted hover:bg-surface-2 hover:text-text'
             }`}
           >
