@@ -105,7 +105,7 @@ def build_audio_to_video_args(req: H3AudioToVideoRequest, output_path: Path, job
     # Resolved before anything is built, so an unknown asset_id fails the request cleanly.
     image_paths = [storage.resolve_asset_path(asset_id) for asset_id in req.image_asset_ids]
     video_paths = [storage.resolve_asset_path(asset_id) for asset_id in req.video_asset_ids]
-    audio_path = storage.resolve_asset_path(req.audio_asset_id)
+    audio_paths = [storage.resolve_asset_path(asset_id) for asset_id in req.audio_asset_ids]
     args = _common_args(
         req,
         workflow="ref2va",
@@ -118,9 +118,14 @@ def build_audio_to_video_args(req: H3AudioToVideoRequest, output_path: Path, job
         args += ["--reference-image", str(path)]
     for path in video_paths:
         args += ["--reference-video", str(path)]
-    args += ["--reference-audio", str(audio_path)]
+    for path in audio_paths:
+        args += ["--reference-audio", str(path)]
+    # A reference video's own soundtrack is used unless its video_audio flag is false (0-based index into the videos).
+    for index, use_soundtrack in enumerate(req.video_audio or []):
+        if not use_soundtrack:
+            args += ["--mute-reference-video", str(index)]
     if req.match_audio_duration:
-        # The audio is only decoded on the compute node, so the runner enforces the ceiling.
+        # The first audio is only decoded on the compute node, so the runner enforces the ceiling.
         args += ["--match-audio-duration", "--max-seconds", str(config.MAX_DURATION_SECONDS)]
     return args
 

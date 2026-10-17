@@ -4,6 +4,21 @@ Dates are when a change shipped on this codebase, not necessarily when you're re
 `api_version` field (`GET /v1/guide?format=json`) is this server's own current version; compare it
 against what you last integrated against.
 
+- **0.14.0** (2026-10-17): **Breaking change** on `POST /v1/h3/videos/audio-to-video` (MiniMax H3's reference mode),
+  which now takes the model's full reference set: up to 9 images (`image_asset_ids`), 3 videos (`video_asset_ids`) and
+  3 audio clips, 12 in all. (1) `audio_asset_id` (one audio, required) is **replaced by `audio_asset_ids`**, a list of
+  up to 3 and optional, so the mode can run from images and/or videos alone (for example several characters from
+  images, brought in by the prompt at the moments it describes). A request that still sends `audio_asset_id` is
+  rejected with 422, not quietly ignored; to upgrade, send `"audio_asset_ids": ["<the same asset_id>"]`. (2) New
+  optional `video_audio`, one true/false per entry of `video_asset_ids`: a reference video that has sound gives its
+  soundtrack to the model by default (as before), and `false` uses that video for its picture only. (3) `<Audio N>`
+  in the prompt counts every audio: a video with a soundtrack takes the next one just before its `<Video N>`, then
+  the `audio_asset_ids` follow (`<Picture N>` and `<Video N>` still count their own kind). The earlier docs said the
+  one audio was always `<Audio 1>`, which is only true when no video carries sound. (4) At least one image or video
+  is still required; `match_audio_duration: true` needs at least one audio and sizes the clip from the first. The
+  per-clip 2 to 15 s and 15 s totals are MiniMax's documented limits and are not enforced here. The web UI form has
+  matching lists and a per-video soundtrack switch, and Retry on an older job fills the audio list from the old field.
+  The 12-reference maximum and several audio clips have not been run on a GPU yet.
 - **0.13.1** (2026-10-16): MiniMax H3 (`/v1/h3/videos/generate`, `/v1/h3/videos/audio-to-video`) no longer limits the
   video to 5 to 15 s. `duration_seconds` (now above 0 up to 60), `num_frames` (now 1 to 1440) and
   `match_audio_duration` accept any length and only round it up to the next 17*n+5 frames, so a 1 s request gives 39

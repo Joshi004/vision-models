@@ -2,8 +2,9 @@
 
   * `H3GenerateRequest`      -- POST /v1/h3/videos/generate: text, or a first and/or
     last frame, to video + audio (the model's "FL2VA" checkpoint).
-  * `H3AudioToVideoRequest`  -- POST /v1/h3/videos/audio-to-video: an audio reference
-    plus image/video references to video + audio (the "Ref2VA" checkpoint).
+  * `H3AudioToVideoRequest`  -- POST /v1/h3/videos/audio-to-video: image/video references
+    (up to 9 images, 3 videos), optionally with audio references (up to 3), to video + audio
+    (the "Ref2VA" checkpoint).
 
 File inputs are referenced by an asset_id obtained from POST /v1/uploads (see
 services/ltx/schemas.py for why). Every asset field is named `asset_id`,
@@ -168,13 +169,14 @@ class H3GenerateRequest(H3ShapeMixin, H3SamplingMixin, PartitionOptionMixin, Inc
 
 
 class H3AudioToVideoRequest(H3ShapeMixin, H3SamplingMixin, PartitionOptionMixin, IncognitoOptionMixin):
-    """Request body for POST /v1/h3/videos/audio-to-video -- video + audio from an audio
-    reference together with image and/or video references (H3's reference mode).
+    """Request body for POST /v1/h3/videos/audio-to-video -- video + audio from image and/or
+    video references, optionally with audio references (H3's reference mode: up to 9 images,
+    3 videos and 3 audio clips, 12 in all).
 
     NOT the same guarantee as LTX's audio-to-video. There the uploaded audio is muxed in
-    unchanged. Here the audio is a reference the model reads and then generates its own
-    soundtrack from; what it does with it (copy it, or only follow its voice and style) is
-    decided by how the prompt describes it."""
+    unchanged. Here an audio reference is something the model reads and then generates its
+    own soundtrack from; what it does with it (copy it, or only follow its voice and
+    style) is decided by how the prompt describes it."""
 
     prompt: str = Field(
         ...,
@@ -182,11 +184,15 @@ class H3AudioToVideoRequest(H3ShapeMixin, H3SamplingMixin, PartitionOptionMixin,
         description=(
             "The prompt, exactly as it should reach the model: nothing rewrites it. Reference mode was trained on a "
             "six-part format: `subject_definitions:`, `summary:`, `retention_analysis:`, `detailed_description:`, "
-            "`overall_soundscape:` and `non_diegetic_music:`. The references are labelled in the order you give "
-            "them, each kind counted on its own: `<Picture 1>` is the first of `image_asset_ids`, `<Video 1>` the "
-            "first of `video_asset_ids`, `<Audio 1>` the audio. How the audio is used is stated in the prompt "
-            "(`fully_copy`, `partially_copy`, `reference`, `weak_reference`). Spoken words go inside "
-            "`<d>[Language] ...</d>` with a speaker id such as `(S1)`. See `GET /v1/guide` for the format, with examples."
+            "`overall_soundscape:` and `non_diegetic_music:`. The references are labelled in a fixed order, each kind "
+            "counted on its own: `<Picture 1>`... are `image_asset_ids` in order, `<Video 1>`... are `video_asset_ids` "
+            "in order, and `<Audio 1>`... are the audio, counted in this order: a reference video that has a "
+            "soundtrack (and is not switched off in `video_audio`) takes the next `<Audio N>` just before its "
+            "`<Video N>`, then the `audio_asset_ids` follow, in order. So with one video that has sound and one audio "
+            "file, `<Audio 1>` is the video's sound and `<Audio 2>` is the file. Only mention labels that exist. How "
+            "each audio is used is stated in the prompt (`fully_copy`, `partially_copy`, `reference`, `weak_reference`). "
+            "Spoken words go inside `<d>[Language] ...</d>` with a speaker id such as `(S1)`. See `GET /v1/guide` for "
+            "the format, with examples."
         ),
         examples=[
             "subject_definitions:\n<Subject 1> is the young woman in <Picture 1>, with long dark hair and a blue cardigan.\n"
@@ -200,23 +206,14 @@ class H3AudioToVideoRequest(H3ShapeMixin, H3SamplingMixin, PartitionOptionMixin,
             "overall_soundscape:\nSoft kitchen room tone.\n\nnon_diegetic_music:\nN/A"
         ],
     )
-    audio_asset_id: str = Field(
-        ...,
-        description=(
-            "asset_id (from POST /v1/uploads) of the audio, or of a video whose audio track is used, that serves as "
-            "the audio reference (`<Audio 1>` in the prompt). Documented for 2 to 15 seconds; other lengths are experimental (see match_audio_duration). Mono or stereo at any sample rate "
-            "(resampled to 32 kHz). Never used on its own: it needs at least one image or video reference. "
-            "This is a reference, not audio that is muxed into the result unchanged -- see the endpoint description."
-        ),
-        examples=["3f2a9c1e4b7d4a6c9e8f1a2b3c4d5e6f"],
-    )
     image_asset_ids: list[str] = Field(
         default_factory=list,
         max_length=config.MAX_REFERENCE_IMAGES,
         description=(
-            f"asset_ids (from POST /v1/uploads) of up to {config.MAX_REFERENCE_IMAGES} reference images -- the speaker's "
-            "appearance, a scene, a style (`<Picture 1>`, `<Picture 2>`, ... in the prompt, in this order). They do "
-            "not set the output's shape (use orientation, or height and width). At least one image or video is required."
+            f"asset_ids (from POST /v1/uploads) of up to {config.MAX_REFERENCE_IMAGES} reference images -- a "
+            "character's appearance, a place, a style (`<Picture 1>`, `<Picture 2>`, ... in the prompt, in this "
+            "order). They do not set the output's shape (use orientation, or height and width). At least one image or "
+            f"video is required; with the videos and audio, at most {config.MAX_REFERENCES} references in all."
         ),
         examples=[["9a8b7c6d5e4f4a3b2c1d0e9f8a7b6c5d"]],
     )
@@ -224,28 +221,73 @@ class H3AudioToVideoRequest(H3ShapeMixin, H3SamplingMixin, PartitionOptionMixin,
         default_factory=list,
         max_length=config.MAX_REFERENCE_VIDEOS,
         description=(
-            f"asset_ids (from POST /v1/uploads) of up to {config.MAX_REFERENCE_VIDEOS} reference videos, 2 to 15 seconds "
-            "each, for motion and camera work (`<Video 1>`, ... in the prompt). A video's own soundtrack is read too. "
-            "Their frame rate is read from the file. At least one image or video is required."
+            f"asset_ids (from POST /v1/uploads) of up to {config.MAX_REFERENCE_VIDEOS} reference videos, documented as "
+            "2 to 15 seconds each and 15 seconds in total, for motion, camera work, or a video to edit or continue "
+            "(`<Video 1>`, ... in the prompt). Their frame rate is read from the file. A video that has a soundtrack "
+            "passes it to the model as well, as its own `<Audio N>` (see the `prompt` field for the numbering); turn "
+            "that off per video with `video_audio`. At least one image or video is required."
+        ),
+        examples=[[]],
+    )
+    video_audio: list[bool] | None = Field(
+        None,
+        description=(
+            "Optional. One flag per entry of `video_asset_ids`, in the same order: true to give the model that "
+            "video's own soundtrack as an extra audio reference (it then takes an `<Audio N>` label just before the "
+            "`<Video N>`), false to use the video for picture only (no `<Audio N>` for it). Omit it to use every "
+            "video's soundtrack, which is what happens by default. A video without any sound has no soundtrack to give, "
+            "whatever the flag says. Must have the same length as `video_asset_ids`."
+        ),
+        examples=[None],
+    )
+    audio_asset_ids: list[str] = Field(
+        default_factory=list,
+        max_length=config.MAX_REFERENCE_AUDIOS,
+        description=(
+            f"Optional. asset_ids (from POST /v1/uploads) of up to {config.MAX_REFERENCE_AUDIOS} audio clips, or of "
+            "videos whose audio track is used, that serve as audio references: a voice's timbre, a music style, a "
+            "soundtrack to reuse (`<Audio N>` in the prompt, after any video soundtracks; see the `prompt` field). Omit "
+            "it to generate from image and/or video references alone. Documented as 2 to 15 seconds each and 15 "
+            "seconds in total; other lengths are experimental (see match_audio_duration). Mono or stereo at any sample "
+            "rate (resampled to 32 kHz). Never used on its own: it needs at least one image or video reference. "
+            "These are references, not audio that is muxed into the result unchanged -- see the endpoint description. "
+            "`match_audio_duration` needs at least one."
         ),
         examples=[[]],
     )
     match_audio_duration: bool = Field(
         False,
         description=(
-            "If true, the video is as long as the audio reference, rounded up onto the 17*n+5 frame grid (so it can be "
-            "a few frames longer than the audio, never shorter, and the audio is never cut). There is no minimum "
-            "length; the audio must not be longer than "
+            "If true, the video is as long as the first audio reference (`audio_asset_ids[0]`), rounded up onto the "
+            "17*n+5 frame grid (so it can be a few frames longer than the audio, never shorter, and the audio is never "
+            "cut). There is no minimum length; the audio must not be longer than "
             f"{config.MAX_DURATION_SECONDS:g} s, otherwise the job fails. EXPERIMENTAL for audio outside 5 to 15 s: "
             "the model is documented for that range only. Mutually exclusive with duration_seconds and num_frames."
         ),
         examples=[False],
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_audio_asset_id(cls, data):
+        # Unknown fields are ignored by default, which would silently drop an old client's audio reference.
+        if isinstance(data, dict) and "audio_asset_id" in data:
+            raise ValueError("'audio_asset_id' was replaced by 'audio_asset_ids', a list of up to 3 asset_ids.")
+        return data
+
     @model_validator(mode="after")
     def _check_references(self):
         if not self.image_asset_ids and not self.video_asset_ids:
-            raise ValueError("Give at least one image (image_asset_ids) or video (video_asset_ids) reference: audio cannot be the only reference.")
+            raise ValueError("Give at least one image (image_asset_ids) or video (video_asset_ids) reference (audio is optional, and cannot be the only reference).")
+        total = len(self.image_asset_ids) + len(self.video_asset_ids) + len(self.audio_asset_ids)
+        if total > config.MAX_REFERENCES:
+            raise ValueError(
+                f"At most {config.MAX_REFERENCES} references in all (images + videos + audio); got {total}."
+            )
+        if self.video_audio is not None and len(self.video_audio) != len(self.video_asset_ids):
+            raise ValueError("'video_audio' needs one true/false value per entry of 'video_asset_ids'.")
+        if self.match_audio_duration and not self.audio_asset_ids:
+            raise ValueError("'match_audio_duration' needs an audio reference (at least one entry in 'audio_asset_ids').")
         if self.match_audio_duration and (self.duration_seconds is not None or self.num_frames is not None):
             raise ValueError("'match_audio_duration' cannot be combined with 'duration_seconds' or 'num_frames'.")
         return self

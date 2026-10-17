@@ -49,7 +49,7 @@ def generate_video(
 @router.post(
     "/videos/audio-to-video",
     tags=["Video generation"],
-    summary="Video with sound from an audio reference plus image/video references (MiniMax H3)",
+    summary="Video with sound from image/video references and an optional audio reference (MiniMax H3)",
     description=h3_docs.AUDIO_TO_VIDEO,
     response_model=JobSubmitResponse,
     responses=common_docs.SUBMIT_RESPONSES,

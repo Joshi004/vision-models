@@ -67,7 +67,8 @@ Usage:
     run_h3.py --model-dir DIR --workflow t2va|fl2va|ref2va --output-path FILE \\
         --work-dir DIR --prompt=TEXT \\
         [--first-frame FILE] [--last-frame FILE] \\
-        [--reference-image FILE ...] [--reference-video FILE ...] [--reference-audio FILE] \\
+        [--reference-image FILE ...] [--reference-video FILE ...] [--mute-reference-video N ...] \\
+        [--reference-audio FILE ...] \\
         [--height N --width N] [--num-frames N | --match-audio-duration] [--max-seconds S] \\
         [--steps N] [--seed N] [--attention-backend NAME] [--parallelism auto|ulysses|split]
 
@@ -119,6 +120,11 @@ DEFAULT_FRAMES = 124  # 5.17 s
 AUDIO_SAMPLE_RATE = 32000
 
 WORKFLOWS = ("t2va", "fl2va", "ref2va")
+# ref2va reference limits, the same ones diffusers enforces (MiniMaxH3Ref2VASetupStep): per kind, and in all.
+MAX_IMAGES = 9
+MAX_VIDEOS = 3
+MAX_AUDIOS = 3
+MAX_REFERENCES = 12
 HANDOFF_NAME = "h3_conditioning.pt"
 HANDOFF_ERROR_NAME = "h3_conditioning_error.txt"
 OUTPUTS = ["videos", "audio", "sampling_rate"]
@@ -196,7 +202,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--last-frame", type=Path, help="fl2va: image the video ends on.")
     p.add_argument("--reference-image", action="append", default=[], type=Path, help="ref2va: repeatable, at most 9.")
     p.add_argument("--reference-video", action="append", default=[], type=Path, help="ref2va: repeatable, at most 3.")
-    p.add_argument("--reference-audio", type=Path, help="ref2va: a voice/music reference; needs an image or video reference.")
+    p.add_argument(
+        "--mute-reference-video",
+        action="append",
+        default=[],
+        type=int,
+        metavar="N",
+        help="ref2va: repeatable; the 0-based index (in --reference-video order) of a video whose own soundtrack is NOT "
+        "given to the model. By default every video that has sound passes it in as an <Audio N> reference.",
+    )
+    p.add_argument(
+        "--reference-audio",
+        action="append",
+        default=[],
+        type=Path,
+        help="ref2va: repeatable, at most 3; a voice/music reference. Needs an image or video reference.",
+    )
     p.add_argument("--height", type=int)
     p.add_argument("--width", type=int)
     p.add_argument("--num-frames", type=int, help=f"Default {DEFAULT_FRAMES} (5.17 s).")
@@ -236,7 +257,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.error("--max-seconds must be positive.")
 
     keyframes = [path for path in (args.first_frame, args.last_frame) if path is not None]
-    references = [*args.reference_image, *args.reference_video, *([args.reference_audio] if args.reference_audio else [])]
+    references = [*args.reference_image, *args.reference_video, *args.reference_audio]
     if args.workflow == "t2va" and (keyframes or references):
         p.error("--workflow t2va takes no keyframes or references.")
     if args.workflow == "fl2va" and (not keyframes or references):
@@ -246,10 +267,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             p.error("--workflow ref2va takes references, not keyframes.")
         if not args.reference_image and not args.reference_video:
             p.error("--workflow ref2va needs at least one --reference-image or --reference-video (audio cannot be the only reference).")
-        if len(args.reference_image) > 9 or len(args.reference_video) > 3:
-            p.error("MiniMax H3 accepts at most 9 reference images and 3 reference videos.")
+        if len(args.reference_image) > MAX_IMAGES or len(args.reference_video) > MAX_VIDEOS or len(args.reference_audio) > MAX_AUDIOS:
+            p.error(f"MiniMax H3 accepts at most {MAX_IMAGES} reference images, {MAX_VIDEOS} videos and {MAX_AUDIOS} audio clips.")
+        if len(references) > MAX_REFERENCES:
+            p.error(f"MiniMax H3 accepts at most {MAX_REFERENCES} references in all, got {len(references)}.")
+    if args.mute_reference_video and args.workflow != "ref2va":
+        p.error("--mute-reference-video needs --workflow ref2va.")
+    for index in args.mute_reference_video:
+        if not 0 <= index < len(args.reference_video):
+            p.error(f"--mute-reference-video {index}: no such reference video (there are {len(args.reference_video)}, counted from 0).")
     if args.match_audio_duration and not (args.workflow == "ref2va" and args.reference_audio):
-        p.error("--match-audio-duration needs --workflow ref2va and --reference-audio.")
+        p.error("--match-audio-duration needs --workflow ref2va and at least one --reference-audio.")
     if args.match_audio_duration and args.num_frames is not None:
         p.error("Give either --num-frames or --match-audio-duration, not both.")
     for path in [*keyframes, *references]:
@@ -536,21 +564,28 @@ def finish_job(args: argparse.Namespace) -> int:
 
 
 def load_references(args: argparse.Namespace):
-    """The ref2va references, decoded: images, then videos, then the audio -- the
-    order the prompt's <Picture N> / <Video N> / <Audio N> labels count in (each
-    kind is numbered on its own). Returns (references, audio reference or None)."""
+    """The ref2va references, decoded: images, then videos, then the audio files, each
+    kept in the order given. The pipeline labels them from this order, each kind on its own:
+    <Picture N> and <Video N> count their own kind, and <Audio N> counts every audio there
+    is: a video that has a soundtrack takes the next <Audio N> just before its <Video N>
+    (unless it is muted, see --mute-reference-video), and the audio files follow.
+    Returns (references, the audio-file references)."""
     from diffusers.modular_pipelines.minimax_h3 import (
         MiniMaxH3AudioReference,
         MiniMaxH3ImageReference,
         MiniMaxH3VideoReference,
     )
 
-    references = [MiniMaxH3ImageReference.from_file(path) for path in args.reference_image]
-    references += [MiniMaxH3VideoReference.from_file(path) for path in args.reference_video]
-    audio = MiniMaxH3AudioReference.from_file(args.reference_audio) if args.reference_audio else None
-    if audio is not None:
-        references.append(audio)
-    return references, audio
+    images = [MiniMaxH3ImageReference.from_file(path) for path in args.reference_image]
+    videos = [MiniMaxH3VideoReference.from_file(path) for path in args.reference_video]
+    for index in args.mute_reference_video:
+        # No soundtrack, no <Audio N> label: the video is conditioned on for its picture alone.
+        videos[index].audio = None
+        videos[index].sample_rate = None
+    audios = [MiniMaxH3AudioReference.from_file(path) for path in args.reference_audio]
+    with_sound = sum(video.has_audio for video in videos)
+    log("condition", f"references: {len(images)} image(s), {len(videos)} video(s) ({with_sound} with a soundtrack), {len(audios)} audio file(s)")
+    return [*images, *videos, *audios], audios
 
 
 def conditioning_inputs(args: argparse.Namespace) -> dict:
@@ -567,8 +602,9 @@ def conditioning_inputs(args: argparse.Namespace) -> dict:
     if args.workflow in ("fl2va", "ref2va") and args.height is not None:
         inputs["height"], inputs["width"] = args.height, args.width
     if args.workflow == "ref2va":
-        inputs["references"], audio = load_references(args)
+        inputs["references"], audios = load_references(args)
         if args.match_audio_duration:
+            audio = audios[0]  # the first --reference-audio sets the length
             seconds = audio.audio.shape[-1] / (audio.sample_rate or AUDIO_SAMPLE_RATE)
             check_max_seconds(args, seconds)
             inputs["num_frames"] = snap_num_frames(round(seconds * FPS))
@@ -1067,9 +1103,9 @@ def choose_parallelism(args: argparse.Namespace) -> str:
     cannot be worked out, split is chosen: it is the one with room to spare."""
     if args.match_audio_duration:
         try:
-            frames = snap_num_frames(round(audio_file_seconds(args.reference_audio) * FPS))
+            frames = snap_num_frames(round(audio_file_seconds(args.reference_audio[0]) * FPS))
         except Exception as error:
-            log("run", f"parallelism auto: could not read the reference audio's length ({error}); using split")
+            log("run", f"parallelism auto: could not read the first reference audio's length ({error}); using split")
             return "split"
     else:
         frames = snap_num_frames(args.num_frames or DEFAULT_FRAMES)

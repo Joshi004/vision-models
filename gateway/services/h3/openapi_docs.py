@@ -37,27 +37,49 @@ Output: MP4, H.264 video + AAC stereo audio (32 kHz), muxed together.
 """
 
 AUDIO_TO_VIDEO = """
-Video with generated sound from references -- an audio reference together with images and/or
-videos -- on MiniMax H3's reference mode. Typical use: a speaker from a photo, saying lines in the
-voice of a recording. Upload every file first with `POST /v1/uploads`.
+Video with generated sound from references -- images, videos and audio clips, mixed -- on MiniMax
+H3's reference mode. Typical uses: a speaker from a photo, saying lines in the voice of a recording;
+several characters and places from images alone, brought in by the prompt at the moments you
+describe (`[Shot 2] At 00:04.000, <Subject 2> walks in ...`); or editing or continuing a video while
+following a voice and keeping its music. The images are references for appearance, not first or
+last frames. Upload every file first with `POST /v1/uploads`.
 
 **This is not the same guarantee as the LTX audio-to-video endpoints.** There, your audio is muxed
-into the output unchanged and only the picture is generated. Here the audio is a *reference*: the
+into the output unchanged and only the picture is generated. Here, audio is a *reference*: the
 model reads it and then generates its own soundtrack together with the picture. What it does with
-the reference is decided by how the prompt describes it -- `fully_copy` (reuse it as the soundtrack),
+each reference is decided by how the prompt describes it -- `fully_copy` (reuse it as the soundtrack),
 `partially_copy`, `reference` (follow its voice timbre and delivery without copying it) or
 `weak_reference`. Either way the soundtrack passes through the model and is not guaranteed to be a
 bit-exact copy. If you need your exact recording with the mouth matched to it, use
 `POST /v1/ltx25/videos/audio-to-video` with `lip_sync: true` (or `POST /v1/tbdub/videos/lip-sync`).
 
-**References.** One audio (`audio_asset_id`, 2 to 15 s) plus at least one image
-(`image_asset_ids`, up to 9) or video (`video_asset_ids`, up to 3): an audio reference cannot stand
-alone. In the prompt they are `<Picture 1>`..., `<Video 1>`... and `<Audio 1>`, in the order given,
-each kind counted on its own.
+**References and limits.** At least one image or video; audio is optional and cannot stand alone.
+
+| Field | Up to | Notes |
+|---|---|---|
+| `image_asset_ids` | 9 | appearance of a character, place or style; any shape from 1:4 to 4:1 |
+| `video_asset_ids` | 3 | motion, camera, or a video to edit or continue; documented as 2 to 15 s each, 15 s in all |
+| `audio_asset_ids` | 3 | a voice, music or sound to follow or reuse; documented as 2 to 15 s each, 15 s in all |
+| all together | 12 | |
+
+The clip-length rules are MiniMax's and are **not enforced here**: every reference is simply cut to
+the length of the output, so treat anything else as experimental. Within each list, the order you
+give is the order the model reads them.
+
+**Labels in the prompt.** Pictures and videos are `<Picture 1>`..., `<Video 1>`..., in the order
+given. Audio is `<Audio 1>`... and is counted in this order: a reference video that has a soundtrack
+takes the next `<Audio N>` just before its `<Video N>` (`video_audio` switches this off per video),
+and then the `audio_asset_ids` follow. So with one video that has sound and one audio file,
+`<Audio 1>` is the video's own sound and `<Audio 2>` is the file. A video with no sound takes no
+`<Audio N>`. Only mention labels that exist.
 
 **Length.** `duration_seconds` / `num_frames` (default 124 frames, 5.17 s), or
-`match_audio_duration: true` to make the video as long as the audio, rounded up to the next 17*n+5
-frames. There is no minimum length; outside the documented 5.17 to 14.4 s is experimental.
+`match_audio_duration: true` (needs at least one `audio_asset_ids` entry; the first one sets the
+length) to make the video as long as that audio, rounded up to the next 17*n+5 frames. There is no
+minimum length; outside the documented 5.17 to 14.4 s is experimental.
+
+**Changed in 0.14.0.** `audio_asset_id` (one audio) became `audio_asset_ids` (a list); a request that
+still sends `audio_asset_id` is rejected with 422.
 
 **Canvas.** References do not set the output's shape: the default is 16:9 (1344x768). Use
 `orientation` or `height` + `width` for anything else.
@@ -118,6 +140,58 @@ _REFERENCE_PROMPT = (
     "N/A"
 )
 
+_TWO_CHARACTERS_PROMPT = (
+    "subject_definitions:\n"
+    "<Subject 1> is the young woman in <Picture 1>, with long dark hair and a blue cardigan.\n"
+    "<Subject 2> is the bearded man in <Picture 2>, with short grey hair and a brown leather jacket.\n\n"
+    "summary:\n"
+    "[reference generation] <Subject 1> waits alone in a quiet cafe; <Subject 2> joins her at her table and the two talk.\n\n"
+    "retention_analysis:\n"
+    "<Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - her face, long dark hair and blue cardigan are retained.\n"
+    "<Subject 2> (appears in [Shot 2]): fully_preserved - his face, grey hair, beard and brown leather jacket are retained.\n\n"
+    "detailed_description:\n"
+    "The target video is live-action with warm window light and a shallow depth of field.\n"
+    "[Shot 1] A medium shot of <Subject 1> (S1) seated at a cafe table, stirring a cup of tea. She glances toward the "
+    "door and says softly, <d>[English] He said he would be here by now.</d>\n"
+    "[Shot 2] At 00:04.000, the camera cuts to a two-shot as <Subject 2> (S2) enters from the left, sits down opposite "
+    "<Subject 1> and says in a warm, low voice, <d>[English] Sorry I am late.</d> <Subject 1> (S1) smiles and "
+    "replies, <d>[English] You are just in time.</d>\n\n"
+    "overall_soundscape:\n"
+    "Quiet cafe chatter, a spoon against porcelain and a door chime.\n\n"
+    "non_diegetic_music:\n"
+    "N/A"
+)
+
+_VIDEO_EDIT_PROMPT = (
+    "subject_definitions:\n"
+    "<Subject 1> is the man in <Video 1>, with short dark hair and a green waxed jacket.\n"
+    "<Video 1> is the source video for the target video edit.\n"
+    "<Audio 1> is the synchronized audio track of <Video 1>, providing the background music.\n"
+    "<Audio 2> is the voice-timbre reference for <Subject 1> (S1).\n\n"
+    "summary:\n"
+    "[video editing + audio reference + audio reuse] The target video is an edited version of <Video 1>. "
+    "<Subject 1> stands at the end of a wooden pier at dusk and now speaks a new line in the voice of <Audio 2>, "
+    "while the music of <Audio 1> keeps playing underneath.\n\n"
+    "retention_analysis:\n"
+    "<Subject 1> (appears in [Shot 1]): fully_preserved - his face, short dark hair and green waxed jacket are "
+    "retained, with his mouth newly animated to speak.\n"
+    "<Video 1> (source video editing): fully_preserved - the framing, dusk light and pier setting are kept.\n"
+    "<Audio 1>: partially_copy - the background music is reused beneath the new dialogue.\n"
+    "<Audio 2>: reference - the target speaker follows the voice timbre of <Audio 2> without copying the original "
+    "signal.\n\n"
+    "detailed_description:\n"
+    "The target video is in a realistic photographic style with warm dusk light.\n"
+    "[Shot 1] The shot begins from the source <Video 1>: <Subject 1>, a man with short dark hair and a green waxed "
+    "jacket, stands at the end of a wooden pier looking out over calm water. The music of <Audio 1> plays "
+    "continuously. <Subject 1> (S1) turns toward the camera and says, with the voice timbre referenced from "
+    "<Audio 2>, <d>[English] The tide turns at midnight.</d> His lips close, and he looks back at the horizon as the "
+    "camera holds.\n\n"
+    "overall_soundscape:\n"
+    "Small waves lap against the pier posts, beneath the music of <Audio 1>.\n\n"
+    "non_diegetic_music:\n"
+    "The background music from <Audio 1> is reused as the continuous score, playing quietly beneath the dialogue."
+)
+
 GENERATE_EXAMPLES = {
     "text_to_video": {
         "summary": "Text-to-video, landscape, default length (5.17 s)",
@@ -170,18 +244,36 @@ AUDIO_TO_VIDEO_EXAMPLES = {
         "summary": "A speaker from a photo, voice taken from a recording",
         "value": {
             "prompt": _REFERENCE_PROMPT,
-            "audio_asset_id": "<asset_id of the voice recording>",
             "image_asset_ids": ["<asset_id of the speaker's photo>"],
+            "audio_asset_ids": ["<asset_id of the voice recording>"],
             "orientation": "landscape",
             "duration_seconds": 6,
+        },
+    },
+    "video_edit_with_voice": {
+        "summary": "Edit a video that has sound: keep its music (<Audio 1>), follow a voice recording (<Audio 2>)",
+        "value": {
+            "prompt": _VIDEO_EDIT_PROMPT,
+            "video_asset_ids": ["<asset_id of the source video, which has a soundtrack>"],
+            "audio_asset_ids": ["<asset_id of the voice recording>"],
+            "duration_seconds": 5,
+        },
+    },
+    "images_only": {
+        "summary": "Several characters from images alone (no audio); the second one enters at 4 s",
+        "value": {
+            "prompt": _TWO_CHARACTERS_PROMPT,
+            "image_asset_ids": ["<asset_id of the first character>", "<asset_id of the second character>"],
+            "orientation": "landscape",
+            "duration_seconds": 8,
         },
     },
     "match_audio": {
         "summary": "Video as long as the audio reference",
         "value": {
             "prompt": _REFERENCE_PROMPT,
-            "audio_asset_id": "<asset_id of the voice recording>",
             "image_asset_ids": ["<asset_id of the speaker's photo>"],
+            "audio_asset_ids": ["<asset_id of the voice recording>"],
             "match_audio_duration": True,
         },
     },

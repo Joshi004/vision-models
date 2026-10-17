@@ -15,8 +15,10 @@ It is used through two endpoints, one per checkpoint partition:
 
 - `POST /v1/h3/videos/generate` -- text, or a first and/or last frame, to video + sound (diffusers workflows `t2va` and
   `fl2va`, the `transformer/` partition, MiniMax's "FL2VA" checkpoint).
-- `POST /v1/h3/videos/audio-to-video` -- an audio reference plus image and/or video references to video + sound (workflow
-  `ref2va`, the `transformer_ref/` partition, the "Ref2VA" checkpoint).
+- `POST /v1/h3/videos/audio-to-video` -- image and/or video references (up to 9 and 3), with optional audio references (up to 3,
+  12 references in all), to video + sound (workflow `ref2va`, the `transformer_ref/` partition, the "Ref2VA" checkpoint). Since
+  0.14.0 the audio is `audio_asset_ids` (a list; it was a single `audio_asset_id`), and `video_audio` switches a reference
+  video's own soundtrack off per video.
 
 License: **MiniMax H3 Community License** (`LICENSE` in the weights folder; summary in `gateway/services/h3/GUIDE.md` §7).
 Read it before relying on this. In particular the weights and their outputs are **not licensed for use or hosting in the
@@ -42,8 +44,18 @@ selecting a workflow loads only its own transformer. Facts that shaped the integ
 - **Prompt.** The encoder prepends a label per reference, numbered per kind (`<Picture i>: `, `<Audio j>: `, `<Video k>: `),
   and reads the hidden state after the 50th decoder layer. Nothing rewrites the prompt text. MiniMax's two prompt guides
   (in the weights folder under `docs/`) describe the structured format the model was trained on.
+- **Reference order and `<Audio j>` numbering.** The references are packed in the order they are passed, and the order sets the
+  labels and each reference's place on the shared rotary clock, so a different order is a different request. The runner always
+  passes images, then videos, then audio files, each in the order given. `<Picture i>` and `<Video k>` count their own kind;
+  `<Audio j>` counts every audio: a video that carries a soundtrack takes the next `<Audio j>` **before** its `<Video k>`, then the
+  audio files follow (`encoders.py`, the presentation tokenizer). The limits (9 images, 3 videos, 3 audio, 12 in all) count
+  references, not soundtracks, so three videos with sound plus three audio files is allowed. A video clip and an audio clip are
+  documented as 2 to 15 s each and 15 s in total per kind; diffusers does not check that, it cuts each reference to the output's
+  length (`_normalize_video_condition`, `_normalize_audio_condition`), and neither does the gateway.
 - **The audio reference.** It never reaches the Qwen3-VL conditioner: it is encoded by the audio VAE alone, into clean
-  conditioning rows of the packed sequence. A reference video's own soundtrack is read as well. What the model does with the
+  conditioning rows of the packed sequence. A reference video's own soundtrack is read as well, unless the runner is told to
+  drop it (`--mute-reference-video N`, which the gateway sets from `video_audio: false`: the reference's `audio` is cleared, so
+  it gets no `<Audio j>` and is conditioned on for its picture alone). What the model does with the
   audio is stated in the prompt (`fully_copy`, `partially_copy`, `reference`, `weak_reference`) -- so it can be reused as
   the soundtrack or only followed for voice timbre. Either way the result is the model's own rendition, not a muxed copy.
   *How close a `fully_copy` is has not been measured here.* (An earlier research note in `LIP_SYNC_RESEARCH.md` described
@@ -198,8 +210,9 @@ restart with `H3_PARALLELISM=split gateway/run.sh` (or `=ulysses`) starts the ga
 - **No prompt rewriting, no negative prompt, no guidance scale.** Write the structured prompt yourself.
 - **The audio reference is not a muxed copy** (see above). For an exact recording with the mouth matched to it, use LTX
   audio-to-video with `lip_sync`, or TBDub on its own.
-- **Not tried:** more than one audio reference (the model allows 3; the API takes one), several speakers, languages other than
-  English, the community turbo LoRAs (4 and 8 steps), quantized or pruned variants, ComfyUI.
+- **Not tried:** several audio references together, a reference video's soundtrack with `video_audio` on and off, the 12-reference
+  maximum (the gateway and runner accept it; memory is unmeasured), several speakers, languages other than English, the
+  community turbo LoRAs (4 and 8 steps), quantized or pruned variants, ComfyUI.
 
 ## Measured on this cluster
 

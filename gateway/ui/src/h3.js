@@ -117,6 +117,36 @@ overall_soundscape: <Ambience, physical sounds and non-verbal human sounds. No d
 
 non_diegetic_music: <Instrumentation, tempo and dynamics of a score the characters cannot hear, or N/A.>`;
 
+// Reference label numbering (what <Picture N>, <Video N> and <Audio N> mean) -- see GUIDE.md and the form's label
+// line: pictures and videos count their own kind in the order given; <Audio N> counts every audio, a reference video
+// that has a soundtrack (and has not been switched off) taking the next one just before its <Video N>, then the audio
+// files. The two reference templates below assume no video soundtrack comes before the audio file; edit the numbers
+// when one does.
+//
+// The same six-part format with no audio reference: several characters from images alone, each brought in at the
+// moment the shot text says so.
+export const REFERENCE_IMAGES_PROMPT_TEMPLATE = `subject_definitions:
+<Subject 1> is <the person in <Picture 1>, with their key visible features>.
+<Subject 2> is <the person in <Picture 2>, with their key visible features>.
+
+summary:
+[reference generation] <One short sentence on what the video shows and how each image is used.>
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - <what is kept>.
+<Subject 2> (appears in [Shot 2]): fully_preserved - <what is kept>.
+
+detailed_description:
+<One or two sentences on the overall style.>
+[Shot 1] <Composition, action and camera.> <Subject 1> (S1) says, <d>[English] <the words.></d>
+[Shot 2] At 00:04.000, <what changes: the cut, and how <Subject 2> enters.> <Subject 2> (S2) says, <d>[English] <the words.></d>
+
+overall_soundscape:
+<Ambience and physical sounds.>
+
+non_diegetic_music:
+N/A`;
+
 export const REFERENCE_PROMPT_TEMPLATE = `subject_definitions:
 <Subject 1> is <the person in <Picture 1>, with their key visible features>.
 <Audio 1> is the voice-timbre reference for <Subject 1> (S1).

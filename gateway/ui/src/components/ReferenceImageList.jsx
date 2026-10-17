@@ -17,7 +17,14 @@ import { XIcon } from './icons.jsx';
 //
 // `itemLabel`, `accept` and `addLabel` default to the image wording above; the
 // MiniMax H3 audio-to-video form reuses this same list for its reference
-// videos (`accept="video/*"`), which are `{ asset }` entries just the same.
+// videos (`accept="video/*"`) and reference audio (`accept="audio/*,video/*"`),
+// which are `{ asset }` entries just the same.
+//
+// `renderExtra(entry, index)`, when given, is drawn under a row's file
+// picker for per-row options that live next to the file (the H3 form's "use
+// this video's soundtrack" checkbox). Such a field is stored on the entry
+// itself, beside `asset`, which is why replacing a row's file keeps the
+// rest of the entry.
 export default function ReferenceImageList({
   model,
   field,
@@ -28,9 +35,10 @@ export default function ReferenceImageList({
   itemLabel = 'Reference image',
   accept = 'image/*',
   addLabel = 'Add reference image',
+  renderExtra = null,
 }) {
   function updateImage(index, asset) {
-    onChange((previous) => previous.map((item, i) => (i === index ? { asset } : item)));
+    onChange((previous) => previous.map((item, i) => (i === index ? { ...item, asset } : item)));
   }
 
   function addImage() {
@@ -55,6 +63,7 @@ export default function ReferenceImageList({
               onChange={(next) => updateImage(index, next)}
               required
             />
+            {renderExtra && renderExtra(entry, index)}
           </div>
           {images.length > minImages && (
             <Button

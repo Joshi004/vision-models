@@ -67,10 +67,14 @@ SIZE_MULTIPLE = 32
 MIN_SIDE = 256
 MAX_SIDE = 1536
 
-# Reference limits (ref2va): 12 in total, of which at most 9 images, 3 videos, 3 audio.
-# The audio-to-video endpoint takes exactly one audio reference.
+# Reference limits (ref2va), the ones diffusers' pipeline enforces: at most 9 images, 3 videos and 3 audio clips,
+# and 12 references of any kind in total. MiniMax also documents each video/audio clip as 2 to 15 s, with the
+# videos adding up to at most 15 s and the audio clips likewise; those length rules are not enforced here (the
+# pipeline cuts every reference to the output's length instead).
 MAX_REFERENCE_IMAGES = 9
 MAX_REFERENCE_VIDEOS = 3
+MAX_REFERENCE_AUDIOS = 3
+MAX_REFERENCES = 12
 
 # ---------------------------------------------------------------------------
 # Slurm allocation shape. TWO GPUs on one node per job: while the prompt is

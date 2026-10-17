@@ -108,7 +108,7 @@ export default function H3ShapeFields({ model, shape, onChange, defaultCanvasHin
         </FieldLabel>
       )}
       {shape.lengthMode === 'match' && (
-        <p className="text-xs text-muted">The video is as long as the audio reference, rounded up to the next 17n+5 frames (no minimum).</p>
+        <p className="text-xs text-muted">The video is as long as the first audio reference, rounded up to the next 17n+5 frames (no minimum).</p>
       )}
       <p className="text-xs text-muted">
         Fixed 24 fps. Lengths are rounded up to the next 17n+5 frames. The model is documented for {H3_DOCUMENTED_RANGE} (124-345
