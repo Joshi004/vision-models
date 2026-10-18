@@ -7,9 +7,11 @@ Qwen3-VL-32B as the text and vision encoder. This project runs the **open releas
 service adds two models that are not in the open weights and therefore not here: *Context-IR* (rewrites a plain request into
 the structured prompt) and *Regenerate-2K* (the 2K upscaler).
 
-> **Status (2026-10-14): built and checked everywhere except on a GPU. No H3 job has run yet** -- the weights had not been
-> downloaded when this was written. Everything about speed, memory and output quality below is marked as unmeasured. The
-> "Measured on this cluster" section at the end is the checklist for the first real runs.
+> **Status (2026-10-17): the 4- and 8-GPU layout below is built and checked everywhere except on a GPU. It has not run yet.**
+> Jobs have run on this cluster on the earlier two-GPU layouts (the notes below recorded only `split` as completing; an
+> `ulysses` attempt with 328 frames, and two requests with large reference images, ran out of memory -- see "Why four or more GPUs"). All the numbers
+> that decide how a request is sized (limits, speed-ups, load times) are **initial guesses**, to be refitted from the usage log.
+> The "Measured on this cluster" section at the end is the checklist for the first runs of the new layout.
 
 It is used through two endpoints, one per checkpoint partition:
 
@@ -75,99 +77,151 @@ complete released weights: nothing is pruned or quantized. (The repository also 
 same weights in `FL2VA/` and `Ref2VA/`, 290 GB more; the download script skips it.) The VAEs are loaded under diffusers'
 `dtype=bfloat16` recipe, but diffusers pins the cast-sensitive modules of the video VAE to float32 itself.
 
-## How a job runs: two GPUs
+## How a job runs: 4 or 8 GPUs, always ulysses
 
-The text encoder and the transformer are each about 62 GiB, so one 80 GB card cannot hold both. Each job reserves **two
-H100s on one node** (`--nodes=1 --gres=gpu:2`) and `models/h3/runner/run_h3.py` splits the workflow the way diffusers' own
-documentation does for "two cards, nothing offloaded", then uses the second card a second time for denoising. How is the
-operator setting **`H3_PARALLELISM`** (`gateway/run.sh`, read when the gateway starts; the gateway passes it to every job as
-`--parallelism`):
+The text encoder and the transformer are each about 62 GiB, so one 80 GB card cannot hold both. Each job reserves **N H100s
+on one node** (`--nodes=1 --gres=gpu:N`, N = 4 or 8, chosen per request by the gateway, see "Sizing") and
+`models/h3/runner/run_h3.py` (`--gpus N --parallelism ulysses`, always passed) lays the work out like this, with the job's GPUs
+in `CUDA_VISIBLE_DEVICES` order `g0, g1, g2, ...`:
 
-- **`auto` (default): the mode is chosen per request from the video's length.** Up to 10 s (243 frames, which is what a 10 s
-  request rounds up to) uses `ulysses`, anything longer uses `split`. A `--match-audio-duration` request is sized from the
-  audio's length, read from the file's header. If that length cannot be read, `split` is used. The choice is logged as
-  `parallelism auto: ... -> ulysses|split`.
-- **`ulysses`: both GPUs compute every denoising step.** Each holds the whole transformer and runs half of the token
-  sequence through every block; around each attention layer the two exchange their halves of the queries, keys and values.
-- **`split`: the blocks are divided between the GPUs and run one after another.** Slower, but each GPU holds only half of the
-  weights, so far more memory is left for activations. The fallback if `ulysses` runs a job out of memory.
+- **g0 (rank 0):** loads the transformer and the VAEs, VAE-encodes the references, broadcasts the transformer to the others,
+  denoises its share, and decodes the result.
+- **g1 and g2:** hold the **text/vision encoder** while the prompt and references are read: Qwen3-VL's 64 decoder layers are
+  split between them (layers 0-31 on g1, 32-63 on g2), so the encoder's per-layer outputs for a long sequence of reference-image
+  tokens have two cards to live on. When the encoder has finished and exited they become ranks 1 and 2.
+- **g3 and up (8-GPU jobs have g3 .. g7):** idle until rank 0 is ready, then ranks 3 and up. They only receive the weights and
+  denoise.
+- **Denoising uses every GPU** (`ulysses_degree=N`): each holds the whole transformer (61.7 GiB) and runs 1/N of the packed
+  token sequence through every block. 56 attention heads divide evenly by 4 and by 8. A 2-GPU layout (`--gpus 2`, the encoder on one
+  GPU) and the `split` mode (transformer blocks divided between two GPUs) are still in the runner as operator fallbacks, but the
+  gateway never asks for either.
 
 ```
-Slurm job (2 GPUs)  ->  run_h3.py (rank 0, GPU a: generation)
-                          |-- spawns child run_h3.py --stage condition (GPU b: conditioning)
-                          |      before_encode -> text_encoder           loads ~62 GiB encoder
+Slurm job (N GPUs)  ->  run_h3.py (rank 0, g0: generation)
+                          |-- spawns child run_h3.py --stage condition (g1 + g2: encoder split over two GPUs)
+                          |      before_encode -> text_encoder           loads ~62 GiB encoder, layers 0-31 | 32-63
                           |      writes work/h3_conditioning.pt, exits
-                          |-- ulysses only: spawns run_h3.py --stage denoise-worker (rank 1, will take GPU b)
-                          |      imports, then waits for rank 0 to open a localhost rendezvous store
-                          |-- loads transformer(_ref) + VAEs             loads ~77 GB, at the same time
-                          |-- waits for the child (it exits, GPU b is free), reads the handoff
-                          |
-                          |  --parallelism split
-                          |-- moves transformer blocks 25-49 (~31 GiB) onto GPU b
-                          '-- vae_encoder -> denoise (N steps; blocks 0-24 on GPU a, 25-49 on GPU b)
-                                          -> decode -> MP4 (PyAV)
-                          |
-                          |  --parallelism ulysses
-                          |-- vae_encoder (references/keyframes) on GPU a, VAEs to host RAM,
+                          |-- spawns N-1 run_h3.py --stage denoise-worker --rank r (r = 1 .. N-1, will take g<r>)
+                          |      each imports, then waits for rank 0 to open a localhost rendezvous store
+                          |-- loads transformer(_ref) + VAEs on g0      loads ~77 GB, at the same time
+                          |-- waits for the child (it exits, g1 + g2 are free), reads the handoff
+                          |-- vae_encoder (references/keyframes) on g0, VAEs to host RAM,
                           |     encoded latents written to work/h3_encoded.pt
-                          |-- opens the store + NCCL group; the worker joins and takes GPU b
-                          |-- copies the whole transformer GPU a -> GPU b over NCCL (nothing is read from disk again)
-                          |-- both ranks: denoise (N steps), each on half of the token sequence, same seed
-                          |-- worker exits; rank 0 moves the transformer to host RAM, decodes on GPU a -> MP4 (PyAV)
+                          |-- opens the store + NCCL group; the workers join and take their GPUs
+                          |-- copies the whole transformer g0 -> every other GPU over NCCL (nothing is read from disk again)
+                          |-- all N ranks: denoise (steps), each on 1/N of the token sequence, same seed
+                          |-- workers exit; rank 0 moves the transformer to host RAM, decodes on g0 -> MP4 (PyAV)
 ```
 
 - The conditioning half's outputs are exactly the inputs the rest reads by name (checked against diffusers' block graph on
   CPU): the text embedding and its row tags, plus the resolved `height`/`width`, `num_frames`, `keyframes` or
   `normalized_references`. They cross as one pickle file in the job's own folder, which the runner deletes when it ends.
-- **Two processes, not threads**, so the two sets of weights are read from disk in parallel: accelerate's weight-loading
-  context patches torch globally, which is not safe across threads. The child sees only the conditioning GPU (as its
-  `cuda:0`). The parent sees both: the generation GPU as `cuda:0` and the conditioning GPU as `cuda:1`, and it only touches
-  `cuda:1` after the child has exited.
-- Loading is lazy: `load_components` memory-maps the weights in seconds, and they are only read from disk when a model
-  first moves onto its GPU. The encoder moves when it first runs; the generation half moves the transformer and VAEs onto
-  its GPU straight away, while the encoder works, so both reads really overlap (the first runs showed the transformer
-  would otherwise be read only after the encoder finished). Diffusers' `ComponentsManager` (`enable_auto_cpu_offload`)
-  still evicts a model to host RAM if a later step needs the room.
-- The VAEs leave the generation GPU when denoising starts. The offload manager only makes room for a model's weights,
-  never for activations, so with the transformer (61.7 GiB) and both VAEs (10.3 GiB) resident, the first audio-to-video
-  jobs ran out of memory on the first denoising step even at 124 frames (generate jobs fit, peaking at 75 GiB). The
-  runner moves both VAEs to host RAM at the first transformer step (`split`) or right after the references are encoded
-  (`ulysses`); their offload hooks bring them back for the decode.
-- **`ulysses`: how the two ranks work together.**
-  - *Context parallelism.* diffusers' `MiniMaxH3Transformer3DModel` already declares how to split its packed sequence
-    (`_cp_plan`): the hidden states, the rotary table and the per-row indices are split in two at the first block, and the
-    two output heads gather the sequence back, so both ranks see the full prediction every step and run the (cheap)
-    scheduler step themselves. `enable_parallelism(ContextParallelConfig(ulysses_degree=2, ulysses_anything=True))` is
-    called on both ranks; `ulysses_anything` because the packed sequence has whatever length the request makes it. The
-    attention backend (`_flash_3_hub` by default) must support it, and does. The two-layer text refiner runs before the
-    split, on text both ranks hold in full, so the runner switches the exchange off for it only
-    (`enable_parallel_denoiser`).
-  - *Inputs.* Both ranks start from identical inputs: the conditioning handoff, plus the encoded reference/keyframe latents
-    rank 0 writes to `work/h3_encoded.pt` (large reference videos would be slow and memory-hungry to push through a GPU
-    collective, and a file is what the conditioning handoff already uses). Each rank draws its noise from its own generator
-    seeded with `--seed`, so the noise is identical.
-  - *Weights.* The worker builds the transformer without weights (meta device) and receives every parameter and buffer from
-    rank 0 over NCCL, shapes and dtypes included (the checkpoint is mixed precision). Expected to take seconds to tens of
-    seconds depending on the GPU link (**not measured yet**: the runner logs `transformer copied to the second GPU in ...s`),
-    where reading 61.7 GiB from shared storage again took 5-11 min.
-  - *Order of events.* The worker is started with the encoder so its imports are done early, but it touches no GPU until
-    rank 0 opens the rendezvous store, which happens only after the encoder has exited and the references are encoded;
-    until then GPU b is the encoder's. `NCCL_NVLS_ENABLE=0` is set for the job to save NCCL buffer memory.
-  - *Failure handling.* A thread in rank 0 watches the worker: if it dies, rank 0 prints the worker's error as the last
-    line (`ERROR: the second denoising process failed: ...`) and stops at once instead of waiting for a GPU operation to
-    time out (10 min). A failure on rank 0 kills the worker.
-  - *Decode.* Rank 0 moves its transformer to host RAM (about 62 GiB, logged), so the VAEs get the GPU back, and decodes
-    alone. The worker has exited by then.
-- **`split`: the transformer is split across both GPUs for denoising.** With all 61.7 GiB on one card, a 345-frame 1344x768 clip
-  (about 103k video tokens) ran out of memory in the first denoising step: the feed-forward layer alone briefly needs
-  12-13 GiB for that sequence, and the 79 GiB card had about 17 GiB left. The conditioning GPU is idle once the encoder's
-  process has exited, so `split_transformer` in `run_h3.py` moves blocks 25-49 of the 50 onto it (`SPLIT_AT`). Each GPU then
-  holds about 31 GiB of weights. Everything outside the block stack (input projections, text refiner, output heads) stays on
-  the generation GPU, which is also the device the offload manager looks at, so it does not move the blocks back. Forward
-  hooks carry the inputs of block 25 to the second GPU and the output of block 49 back; the blocks still run one after
-  another, so the output is the same. Per denoising step, one hidden-state tensor crosses each way, plus a copy of the
-  rotary table (about 0.1 GiB) for each moved block.
+- **Separate processes, not threads**, so the weights are read from disk in parallel: accelerate's weight-loading context patches
+  torch globally, which is not safe across threads. The child sees only the encoder's GPUs (as its `cuda:0` and `cuda:1`); the
+  parent sees all N: g0 as `cuda:0`, and it only touches the others after the child has exited.
+- **The encoder is placed by hand** (`split_text_encoder`): the vision tower, token embeddings, rotary embedding and layers 0-31
+  go to `cuda:0`, layers 32-63 and the final norm to `cuda:1`, and a forward pre-hook on layer 32 moves the hidden states and
+  position embeddings across. The first parameter of the whole encoder stays on `cuda:0`, which is the device the offload manager
+  (`ComponentsManager.enable_auto_cpu_offload`) looks at, so it does not move the layers back.
+- Loading is lazy: `load_components` memory-maps the weights in seconds, and they are only read from disk when a model first
+  moves onto its GPU. The encoder moves when it first runs; the generation half moves the transformer and VAEs onto g0 straight
+  away, while the encoder works, so both reads really overlap.
+- The VAEs leave g0 right after the references are encoded. The offload manager only makes room for a model's weights, never for
+  activations, so with the transformer (61.7 GiB) and both VAEs (10.3 GiB) resident, the first audio-to-video jobs ran out of
+  memory on the first denoising step even at 124 frames. Their offload hooks bring them back for the decode.
+- **`ulysses`: how the ranks work together.**
+  - *Context parallelism.* diffusers' `MiniMaxH3Transformer3DModel` already declares how to split its packed sequence (`_cp_plan`):
+    the hidden states, the rotary table and the per-row indices are split N ways at the first block, and the two output heads
+    gather the sequence back, so every rank sees the full prediction each step and runs the (cheap) scheduler step itself.
+    `enable_parallelism(ContextParallelConfig(ulysses_degree=N, ulysses_anything=True))` is called on every rank;
+    `ulysses_anything` because the packed sequence has whatever length the request makes it. The attention backend
+    (`_flash_3_hub` by default) must support it, and does. The two-layer text refiner runs before the split, on text every rank
+    holds in full, so the runner switches the exchange off for it only (`enable_parallel_denoiser`).
+  - *Inputs.* Every rank starts from identical inputs: the conditioning handoff, plus the encoded reference/keyframe latents rank
+    0 writes to `work/h3_encoded.pt`. Each rank draws its noise from its own generator seeded with `--seed`, so the noise is
+    identical.
+  - *Weights.* A worker builds the transformer without weights (meta device) and receives every parameter and buffer from rank 0
+    over NCCL (one broadcast to all ranks), shapes and dtypes included (the checkpoint is mixed precision). Expected to take
+    seconds to tens of seconds depending on the GPU link (**not measured yet**: the runner logs
+    `transformer copied to the other N GPU(s) in ...s`), where reading 61.7 GiB from shared storage again took 5-11 min.
+  - *Order of events.* The workers are started with the encoder so their imports are done early, but they touch no GPU until rank
+    0 opens the rendezvous store, which happens only after the encoder has exited and the references are encoded; until then g1 and
+    g2 are the encoder's. `NCCL_NVLS_ENABLE=0` is set for the job to save NCCL buffer memory.
+  - *Failure handling.* A thread in rank 0 watches every worker: if one dies, rank 0 prints that worker's error as the last line
+    (`ERROR: a denoising process failed: ...`) and stops at once instead of waiting for a GPU operation to time out (10 min). A
+    failure on rank 0 kills the workers.
+  - *Decode.* Rank 0 moves its transformer to host RAM (about 62 GiB, logged), so the VAEs get g0 back, and decodes alone. The
+    workers have exited by then.
+- **Why four or more GPUs.** Memory per GPU while denoising is the 61.7 GiB of weights plus activations for 1/N of the sequence:
+  about 15 GiB are left and each row of the sequence costs about 0.18 MiB, so more GPUs means a longer sequence fits, and each
+  step also runs faster. Two earlier failures led here: (1) requests with **two large reference images** (13,673 and 16,809
+  encoder tokens) ran the encoder out of memory on its single GPU before denoising even started, because the encoder keeps every
+  layer's output (about 0.63 MiB per token) next to its 62 GiB of weights; (2) a 328-frame video in the two-GPU `ulysses` mode ran
+  out of memory on the first GPU. `split` was the only mode recorded as completing, but it runs two GPUs one after the other and cannot help the
+  encoder.
+- **`split` (operator fallback, `--gpus 2 --parallelism split` only).** With all 61.7 GiB on one card, a 345-frame 1344x768 clip
+  (about 103k video tokens) ran out of memory in the first denoising step. `split_transformer` in `run_h3.py` moves blocks 25-49
+  of the 50 onto the conditioning GPU once the encoder has exited, so each GPU holds about 31 GiB of weights and the blocks run
+  one after another. Hooks carry the inputs of block 25 to the second GPU and the output of block 49 back.
 - A job is a cold start every time, like every other backend here: nothing stays loaded.
+
+## Sizing: how many GPUs, and the estimate
+
+Before a job is queued, `gateway/services/h3/sizing.py` sizes the request from the request body and the **headers** of the uploaded
+files (Pillow reads an image's size, PyAV a video's or audio's length, picture size and whether it has a soundtrack; nothing is
+decoded). It mirrors what diffusers' pipeline does with the same inputs:
+
+| Quantity | Rule |
+|---|---|
+| Canvas | the request's `orientation` / `height` + `width`; else 16:9 (768x1344); else, for a keyframe request, the first keyframe's aspect ratio (short edge 768, area at most 768x1344, multiples of 32) |
+| Target video rows | `(5n + 2)` latent frames (a `17n + 5` frame clip) x `(H/32) x (W/32)` |
+| Target audio rows | 80 per second of output (40 latents per second, two channels) |
+| Prompt tokens | `ceil(characters / 3.5)` plus 16 per reference for its label |
+| Image reference | scaled to a 2048 px short edge (upscaling included, no area cap, sides rounded to 32); `tokens = rows = (w/32) x (h/32)`; an aspect ratio beyond 1:4 / 4:1 is refused. Checked exactly against the two failed jobs (13,673 and 16,809 encoder tokens) |
+| Keyframe | a canvas worth of tokens and of rows each |
+| Video reference | cut to the output's length (and the VAE snaps its frames down to `17n + 5`); put on the canvas of its **own** aspect ratio; the encoder reads it at 2 frames per second, two frames per block, and a block is one canvas worth of tokens plus 8 (about one block per second of video; an upper bound beyond ~12 s, where Qwen3-VL starts to shrink the frames); its picture rows are `(5n + 2)` x canvas rows; plus 80 rows per second for its soundtrack unless `video_audio` turns it off |
+| Audio reference | cut to the output's length, 80 rows per second; no encoder tokens beyond the label |
+| `match_audio_duration` | the first audio's length is read from its header here, so the frame count is known at submission |
+
+`encoder_tokens` is the prompt plus every reference's tokens; `denoise_rows` is those tokens plus all picture rows, audio rows and the
+target video's rows. Then:
+
+- **GPU count:** the smallest value in `H3_GPU_OPTIONS` (default `4,8`) with `denoise_rows / N <= H3_ROWS_PER_GPU` (initial guess 40,000
+  per GPU; about 80,000 would just fit, from 15 GiB / 0.18 MiB) whose estimated time is within `H3_API_TIME`.
+- **Refused (HTTP 422, nothing queued)** when `encoder_tokens > H3_MAX_ENCODER_TOKENS` (initial guess 60,000), when no option fits,
+  or when even the largest option's estimate is over the job time limit. The `detail` is one sentence with the numbers.
+- **Estimate (`estimated_run_seconds`)**, in seconds, before the queue: `330` loading + `60` weight copy + reference encode
+  (0.0004 s per picture row: **a placeholder, never measured**) + `120` decode + `862 x (rows / 73000)^1.5 x steps / 50 / speedup[N]`, with
+  speed-ups `{4: 3.0, 8: 5.0}`, all multiplied by 2 for the denoising when `H3_ATTENTION_BACKEND` is not a FlashAttention-3 backend. The
+  exponent 1.5 sits between linear (feed-forward) and quadratic (attention). Slurm's `--time` is twice the estimate plus 10 minutes,
+  kept between 30 minutes and `H3_API_TIME`.
+- **The Slurm allocation:** `--gres=gpu:N --cpus-per-task=8N --mem=${H3_MEM:-256G}` (both halves load into host RAM at once, about
+  144 GB).
+
+The result goes back to the client as `gpus` and `estimated_run_seconds` on the submit response, `GET /v1/jobs/{id}` and
+`GET /v1/jobs`; the web UI shows them on every job row and in the form after submitting. They are also stored with the job
+(`jobs.db` columns `gpus`, `estimated_run_seconds`) and in the job folder as `sizing.json` (numbers only).
+
+### The usage log (numbers only, for calibration)
+
+Whenever an H3 job finishes, the gateway's poller appends one JSON line to **`$VISION_DATA_DIR/metrics/h3_jobs.jsonl`**
+(`gateway/services/h3/usage_log.py`). A line holds: the job's outcome, GPUs, estimate, queue wait and run time; `sizing.json`; the runner's
+`metrics.<role>.json` files (`run`, `condition`, `worker<r>`: stage timings, peak GPU memory per GPU, the encoder's actual token
+count, the packed sequence's actual length, and for a failure the stage and the out-of-memory sizes parsed from the error); and one
+`sacct` call (state, node, elapsed seconds, peak host RAM). **Never the prompt, file names, asset ids or error messages** (only an error's type and the out-of-memory sizes in it). A job sent with
+`incognito: true` is recorded the same way with its job id left out. The log lives outside `jobs/`, so retention does not delete it, and
+`purge_all_data.sh` leaves `metrics/` alone.
+
+```bash
+# Add the jobs that ran before the log existed (from their run.log, args.json and sacct; marked "source": "backfill").
+$VISION_DATA_DIR/envs/gateway/bin/python scripts/h3_usage_log.py backfill --dry-run     # then without --dry-run
+# One row per job, one column per number, for a spreadsheet.
+$VISION_DATA_DIR/envs/gateway/bin/python scripts/h3_usage_log.py csv --output h3_jobs.csv
+```
+
+The thresholds and speed-ups above are meant to be refitted from this data once 4- and 8-GPU jobs have run: compare `sizing.denoise_rows`
+with `metrics.run.sequence_rows` and `sizing.encoder_tokens` with `metrics.condition.encoder_tokens` (the formulas), the peak memory per
+GPU with the limits, and `sizing.estimated_run_seconds` with `run_s` (the time model).
 
 ## Setup
 
@@ -184,11 +238,12 @@ and writes the MP4). The upstream code is not vendored: it is the installed diff
 `models/h3/env/requirements.lock.txt`. The gateway side is `gateway/services/h3/`; the Slurm-side wrapper is
 `models/h3/runner/run_h3.py`.
 
-Operator settings (environment variables of the gateway process, see `gateway/run.sh`): `H3_MODEL_DIR`, `H3_MEM_PER_GPU`
-(112G, so 224G for the job), `H3_CPUS` (16 in total), `H3_API_TIME` (01:30:00), `H3_ATTENTION_BACKEND` (`_flash_3_hub` when
-started with `gateway/run.sh`), and `H3_PARALLELISM` (`auto`, the default; `ulysses` or `split` force that mode for every request).
-`H3_PARALLELISM` is read when the gateway starts: every request sent after a restart follows it, and a
-restart with `H3_PARALLELISM=split gateway/run.sh` (or `=ulysses`) starts the gateway in that mode.
+Operator settings (environment variables of the gateway process, see `gateway/run.sh` and `vision.env.example`; all are read when the
+gateway starts): `H3_MODEL_DIR`; `H3_GPU_OPTIONS` (`4,8`; `4` pins every job to four GPUs); `H3_ROWS_PER_GPU` (40000) and
+`H3_MAX_ENCODER_TOKENS` (60000), the limits a request is sized against; `H3_MEM` (256G for the whole job), `H3_CPUS_PER_GPU` (8) and
+`H3_API_TIME` (01:30:00, also the longest estimate a request may have); and `H3_ATTENTION_BACKEND` (`_flash_3_hub` when started with
+`gateway/run.sh`). There is no `H3_PARALLELISM` any more: jobs always use `ulysses`. The gateway environment now also needs Pillow and
+PyAV (`gateway/requirements.lock.txt`, the same pins as the `h3` environment) to read the uploaded files' headers.
 
 ## Things the wrapper does because diffusers' recipe does not
 
@@ -200,8 +255,10 @@ restart with `H3_PARALLELISM=split gateway/run.sh` (or `=ulysses`) starts the ga
 | Weights missing or half downloaded | Fails first with "weights are incomplete ... run models/h3/download_weights.sh" instead of an obscure loader error |
 | The handoff holds processed copies of the request's reference media | Deletes it (and the scratch folder) when the run ends, success or not |
 | A failed conditioning half | The parent reads its error file and prints `ERROR: conditioning step failed: ...` as the last line, which is what the job status shows |
-| `ulysses`: the second denoising process dies while rank 0 waits on it inside a GPU operation | A watcher thread in the parent prints `ERROR: the second denoising process failed: ...` (the worker's own error) as the last line and stops at once, instead of waiting out the 10 min GPU-operation timeout |
-| A bad `H3_PARALLELISM` value | `gateway/run.sh` and `gateway/services/h3/config.py` refuse to start the gateway with it, so it never becomes a failure in every job |
+| A denoising worker dies while rank 0 waits on it inside a GPU operation | A watcher thread in the parent prints `ERROR: a denoising process failed: ...` (the worker's own error) as the last line and stops at once, instead of waiting out the 10 min GPU-operation timeout |
+| A bad `H3_GPU_OPTIONS`, `H3_ROWS_PER_GPU` or `H3_MAX_ENCODER_TOKENS` value | `gateway/run.sh` and `gateway/services/h3/config.py` refuse to start the gateway with it, so it never becomes a failure in every request |
+| A request that cannot fit on 8 GPUs, or whose encoder input is too long | The gateway refuses it with 422 and the numbers before any job is queued (see "Sizing") |
+| A failed or finished job | Every process writes `metrics.<role>.json` into the job folder (numbers and stage names only) for the usage log |
 
 ## Limits
 
@@ -216,42 +273,39 @@ restart with `H3_PARALLELISM=split gateway/run.sh` (or `=ulysses`) starts the ga
 
 ## Measured on this cluster
 
-**Nothing yet.** Figures that circulate elsewhere (an independent benchmark: ~94 s for a 5.17 s 960x544 clip, 20 steps, on one
-H100 with CPU offload; a 4x H100 cloud session averaging ~4.7 min per clip at 50 steps) were taken with different settings and
-are not predictions for this deployment. To fill in on the first runs, per job (both GPUs sampled every few seconds, as for
-TBDub):
+**Nothing yet for the 4- and 8-GPU layout.** Figures that circulate elsewhere (an independent benchmark: ~94 s for a 5.17 s 960x544 clip,
+20 steps, on one H100 with CPU offload; a 4x H100 cloud session averaging ~4.7 min per clip at 50 steps) were taken with different settings
+and are not predictions for this deployment. From the first runs on, **the usage log records these numbers for every job** (see "The usage
+log"), so there is nothing to copy by hand; the first runs are for checking them against what the gateway predicted:
 
-| | To record |
+| | Where to read it |
 |---|---|
-| Load time, conditioning half / generation half | printed in the job's `run.log` (`loaded in ...s`) |
-| Peak GPU memory, each GPU | the conditioning half prints its own peak. `split`: the generation half prints `peak GPU memory since the split: generation GPU ..., second GPU ...` (counted from after the transformer is split, so the earlier full load does not count). `ulysses`: `peak GPU memory during denoising: generation GPU ..., second GPU ...` (counted from the start of denoising; the worker prints its own too, tagged `denoise-worker`) |
-| Peak host RAM | from `sacct`/`seff` (expected ~134 GiB, about 144 GB, while both halves load; `ulysses` adds ~62 GiB when rank 0 moves its transformer off the GPU for the decode, after the encoder is long gone) |
-| Denoising time, 1344x768, 124 frames and 345 frames | `split`: `generated N frames ... in ...s`. `ulysses`: `denoised in ...s` (then `decoded N frames ... in ...s`). Compare the two modes on the same request and seed |
-| `ulysses`: weight copy and GPU link | `transformer copied to the second GPU in ...s`; `nvidia-smi topo -m` inside a job shows whether the GPUs share NVLink |
-| `ulysses`: decode handover | `transformer moved off the GPU for the decode in ...s` |
-| Whole job, cold | Slurm run time; this replaces `TYPICAL_RUN_SECONDS` (20 min, a guess) and `H3_API_TIME` |
+| Load time, per half | `metrics.run.timings_s.load_gpu`, `metrics.condition.timings_s.load_encoder` (and `loaded in ...s` in `run.log`) |
+| Peak GPU memory, each GPU | `metrics.*.peak_gib`; `run.log` prints `peak GPU memory during denoising` per rank, and the conditioning half prints its own peak |
+| Peak host RAM | `slurm.max_rss_gib` (expected ~134 GiB, about 144 GB, while both halves load; rank 0 adds ~62 GiB when it moves its transformer off the GPU for the decode, after the encoder is long gone) |
+| Rows the gateway predicted vs rows that ran | `sizing.denoise_rows` vs `metrics.run.sequence_rows`; `sizing.encoder_tokens` vs `metrics.condition.encoder_tokens` |
+| Estimated vs actual time | `sizing.estimated_run_seconds` and `sizing.estimate_parts_seconds` vs `run_s` and `metrics.run.timings_s` (reference encode, weight copy, denoise, decode) |
+| Weight copy and GPU link | `metrics.run.timings_s.weights_copy`; `nvidia-smi topo -m` inside a job shows whether the GPUs share NVLink |
+| Attention backend | `H3_ATTENTION_BACKEND=_flash_3_hub` (diffusers: ~3x faster on Hopper) is the default under `gateway/run.sh`; the estimate doubles its denoising time without it |
 | `fully_copy` fidelity | listen: is the reference audio reproduced closely, or only its voice? |
-| Attention backend | try `H3_ATTENTION_BACKEND=_flash_3_hub` (diffusers: ~3x faster on Hopper) -- see below |
+
+The first runs to make, each submitted by hand and checked against the table above: the text-only 243-frame baseline (the estimate says
+4 GPUs and about 13 minutes with FlashAttention 3), the request with two large reference images that ran the encoder out of memory, five
+reference images, and one reference video.
 
 **Likely first problems**
 
-- **Out of GPU memory on the generation GPU** for a long clip at full size. Measured with the whole transformer on one
-  card (peak GPU memory, 1344x768 unless noted): 124 frames 70.4 GiB, 243 frames at 768x992 71.4 GiB, and 345 frames ran out
-  of memory in the first denoising step. The transformer split across both GPUs (see above) is meant to fix this, but **it has
-  not yet been run end to end**: record the two `peak GPU memory since the split` figures and the `generated N frames ... in ...s`
-  time for 345 frames at 1344x768, and for 124 frames to compare with the earlier ~710 s. If a job still runs out of memory,
-  retry with a smaller canvas (960x544 is the documented speed lever) or a shorter clip; the next step would be group
-  offloading, which is not wired in.
-- **`ulysses` has NOT been run to completion yet; `auto` uses it for videos up to 10 s.** A 328-frame job (13 s, 768x1344) ran
-  out of memory on the first GPU in ulysses mode, which is why longer videos go to `split` under `auto`. Whether 243 frames
-  fits with room to spare is expected, not measured. It trades memory for speed: each GPU holds all 61.7 GiB, which leaves
-  about 17 GiB for activations of half the tokens (plus NCCL buffers). Expected, not measured: it fits a plain 345-frame
-  1344x768 clip with a few GiB to spare, and it is the **long clips, large canvases and many references** that can run out of
-  memory (the reference tokens are part of the same sequence). Read both `peak GPU memory during denoising` figures, and if a
-  job runs out of memory restart the gateway with `H3_PARALLELISM=split`. The VAE-encode step still runs next to the whole
-  transformer (about 72 GiB), as it did before the block split; reference videos make it heavier. Also unmeasured: the speedup
-  itself (expected 1.6-1.9x on denoising, from published two-GPU results for video transformers, not from this cluster).
-- **Host RAM:** both halves hold their weights in RAM while loading. If a job is killed for memory, raise `H3_MEM_PER_GPU`.
+- **Out of GPU memory on the generation GPU** for a very long clip at full size. Measured on the older layout, with the whole
+  transformer on one card (peak GPU memory, 1344x768 unless noted): 124 frames 70.4 GiB, 243 frames at 768x992 71.4 GiB, and 345 frames
+  ran out of memory in the first denoising step. The 4- and 8-GPU layout gives each GPU only 1/N of the sequence, and the gateway refuses
+  requests above `H3_ROWS_PER_GPU` rows per GPU, but that limit is a guess: if a job still runs out of memory, read `metrics.run.peak_gib`
+  and `metrics.run.oom`, lower `H3_ROWS_PER_GPU`, and compare the failed job's `sequence_rows` with the estimate.
+- **The encoder:** it keeps about 0.63 MiB per token on top of its half of the weights; `H3_MAX_ENCODER_TOKENS` (60,000) is a guess at
+  where two GPUs run out. The conditioning stage's `metrics.condition.peak_gib` and `failed_stage` say how close a job came.
+- **The VAE encode step** of the references runs on g0 next to the whole transformer (about 72 GiB), and reference videos make it
+  heavier; the estimate's time per picture row for it (`REFERENCE_ENCODE_SECONDS_PER_ROW` in `config.py`) is a placeholder.
+- **Host RAM:** both halves hold their weights in RAM while loading. If a job is killed for memory, raise `H3_MEM` (256G by default for
+  the whole job).
 - **`_flash_3_hub` offline:** the kernel is fetched from the Hub by the `kernels` package, which is not in the environment, and
   jobs run with `HF_HUB_OFFLINE=1`. Untested sketch: `uv pip install kernels` into `envs/h3`, then on a node with internet run
   `python -c "from kernels import get_kernel; get_kernel('kernels-community/flash-attn3')"` so the cache is filled, then set
@@ -270,4 +324,17 @@ TBDub):
 - `scripts/build_env.sh h3` from the lock file, and `hf download --dry-run` of the exact include patterns against the pinned
   revision (210.3 GB).
 
-Not checked: the text encoder step, the transformer, the decode, the two-process timing, memory, and `sbatch --gres=gpu:2`.
+Not checked: the text encoder step, the transformer, the decode, the process timing, memory, and `sbatch --gres=gpu:4` / `gpu:8`.
+
+## What was checked without a GPU for the 4- and 8-GPU layout (2026-10-17)
+
+- The runner compiles and its argument parser accepts `--gpus`, `--parallelism` and `--metrics-dir`.
+- The sizer on synthetic images, videos and audio (made with PyAV and Pillow): the token counts of the two failed jobs are reproduced
+  exactly, and the GPU choice, the 422 messages (too many encoder tokens, too many rows, too long) and `sizing.json` come out as intended.
+- `dispatch.py` with a stand-in `sbatch`: the `--gres`, `--cpus-per-task`, `--mem` and `--time` it passes, and the runner's argv.
+- The usage log: a record built from a fake finished job (the prompt does not appear in it; an incognito job's id is omitted), and the
+  `backfill --dry-run` against the existing database (26 earlier H3 jobs).
+- The web UI builds.
+
+Not checked: any job on a GPU, `ulysses` with 4 or 8 ranks, the encoder split, the metrics files a real run writes, or the
+estimate against real times.

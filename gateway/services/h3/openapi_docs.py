@@ -12,6 +12,8 @@ can't capture.
 
 from __future__ import annotations
 
+from common import openapi_docs as common_docs
+
 GENERATE = """
 Text-to-video, or first-frame / last-frame / first-to-last-frame video, with generated sound, on
 MiniMax H3 (open weights, run on this cluster). Video and audio come out of the same denoising
@@ -21,8 +23,11 @@ loop, so quoted dialogue in the prompt is spoken with matching lip movement.
 `last_frame_asset_id` (upload them first with `POST /v1/uploads`): the video starts from, ends on,
 or runs between those frames. All of these use the same model checkpoint.
 
-**Two GPUs per job.** Each job reserves two H100s on one node (the text/vision encoder on one, the
-transformer on the other), runs once, and releases them. There is no warm model between requests.
+**4 or 8 GPUs per job, chosen from the request.** Each job reserves that many H100s on one node, runs once, and
+releases them; there is no warm model between requests. Before anything is queued the server sizes the request
+(the prompt, the length and canvas, and any frames) and the response says how many GPUs the job got (`gpus`) and
+about how long it will run once it starts (`estimated_run_seconds`; a rough figure, not a promise). A request too
+big for the GPUs is refused with 422 and a sentence saying why; nothing is queued.
 
 **The prompt is used exactly as sent.** Nothing here rewrites or enlarges it. H3 was trained on a
 structured prompt format; write it yourself (see the MiniMax H3 section of `GET /v1/guide`). There is
@@ -30,8 +35,8 @@ no `negative_prompt` and no guidance scale: the weights are guidance-distilled.
 
 **Shape and length.** 24 fps, 768 pixels on the short edge by default (1344x768 landscape, 768x1344
 portrait). Lengths are rounded up to the next 17*n+5 frame count; the model is documented for 5.17 to
-14.4 seconds and anything shorter or longer is **experimental** (quality unknown, long clips may run out
-of GPU memory). Only 768p is available from the open weights; the hosted service's 2K upscaling pass is not part of them.
+14.4 seconds and anything shorter or longer is **experimental** (quality unknown, and a clip too long for the GPUs is
+refused with 422). Only 768p is available from the open weights; the hosted service's 2K upscaling pass is not part of them.
 
 Output: MP4, H.264 video + AAC stereo audio (32 kHz), muxed together.
 """
@@ -84,12 +89,60 @@ still sends `audio_asset_id` is rejected with 422.
 **Canvas.** References do not set the output's shape: the default is 16:9 (1344x768). Use
 `orientation` or `height` + `width` for anything else.
 
-**Two GPUs per job, prompt used exactly as sent, no negative prompt or guidance scale** -- as on
-`POST /v1/h3/videos/generate`. The prompt format for this mode is different (six parts, with
-reference labels); see the MiniMax H3 section of `GET /v1/guide`.
+**GPUs and size.** As on `POST /v1/h3/videos/generate`, the server sizes the request and picks 4 or 8 GPUs
+(`gpus` and `estimated_run_seconds` in the response). References are what make a request big: every image is
+read at a 2048 px short edge and becomes thousands of tokens, and a video adds a canvas worth of tokens per second
+and picture rows for its frames. A request too big for the GPUs -- many or large references on a long video --
+is refused with 422 and a sentence with the numbers and what to change (fewer or smaller references, a shorter
+video, a smaller canvas); nothing is queued.
+
+**Prompt used exactly as sent, no negative prompt or guidance scale** -- as on `POST /v1/h3/videos/generate`.
+The prompt format for this mode is different (six parts, with reference labels); see the MiniMax H3 section of
+`GET /v1/guide`.
 
 Output: MP4, H.264 video + AAC stereo audio (32 kHz), muxed together.
 """
+
+# H3's submit errors: the shared ones, with 422 widened to the second thing it can mean here.
+SUBMIT_RESPONSES = {
+    **common_docs.SUBMIT_RESPONSES,
+    422: {
+        "description": (
+            "Either the request failed schema validation (`detail` is a list, as on every endpoint), or it is valid "
+            "but too big for this server's GPUs -- too many or too large references, or too long a video -- in which "
+            "case `detail` is one sentence with the numbers and what to change, and nothing was submitted."
+        ),
+        "content": {
+            "application/json": {
+                "examples": {
+                    "schema_validation": {
+                        "summary": "Failed schema validation",
+                        "value": {
+                            "detail": [
+                                {
+                                    "type": "value_error",
+                                    "loc": ["body"],
+                                    "msg": "Value error, Use either 'orientation' or explicit 'height'/'width', not both.",
+                                    "input": {},
+                                }
+                            ]
+                        },
+                    },
+                    "too_big": {
+                        "summary": "Valid, but does not fit",
+                        "value": {
+                            "detail": (
+                                "The video needs about 435,250 rows of GPU memory work; on 8 GPUs that is 54,407 per GPU, "
+                                "more than this server's limit of 40,000. Use a shorter video, a smaller size or fewer "
+                                "references."
+                            )
+                        },
+                    },
+                }
+            }
+        },
+    },
+}
 
 # ---------------------------------------------------------------------------
 # Named request-body examples (Swagger's "Examples" dropdown per endpoint)

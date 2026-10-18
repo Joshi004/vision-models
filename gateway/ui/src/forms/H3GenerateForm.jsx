@@ -58,7 +58,7 @@ export default function H3GenerateForm({ defaultPartition, onSubmitted, initialR
   const [advancedOpen, setAdvancedOpen] = usePersistedState(`advancedOpen:${FORM_ID}`, false);
 
   const schemas = useSchemas();
-  const { submit, submitting, error, lastJobId } = useSubmitJob(onSubmitted);
+  const { submit, submitting, error, lastJobId, lastResult } = useSubmitJob(onSubmitted);
 
   const { prompt, firstFrame, lastFrame, steps, seed, shape, partition } = values;
 
@@ -89,7 +89,7 @@ export default function H3GenerateForm({ defaultPartition, onSubmitted, initialR
   return (
     <FormShell
       title="Text / frame to video (MiniMax H3)"
-      description="Video with generated stereo sound from a prompt, optionally starting from a first frame and/or ending on a last frame. Every job holds two GPUs and starts cold. The prompt reaches the model exactly as typed (nothing rewrites it) and is expected in H3's structured format -- see the MiniMax H3 section of /v1/guide."
+      description="Video with generated stereo sound from a prompt, optionally starting from a first frame and/or ending on a last frame. Every job holds 4 or 8 GPUs, chosen from the size of the request (the response says how many, with an estimated run time), and starts cold. A request too big for the GPUs is refused with the reason. The prompt reaches the model exactly as typed (nothing rewrites it) and is expected in H3's structured format -- see the MiniMax H3 section of /v1/guide."
       endpoint="POST /v1/h3/videos/generate"
       prefillJob={prefillJob}
       onClearPrefill={onClearPrefill}
@@ -100,6 +100,7 @@ export default function H3GenerateForm({ defaultPartition, onSubmitted, initialR
       submitting={submitting}
       error={error}
       lastJobId={lastJobId}
+      lastResult={lastResult}
       submitLabel="Generate video"
       onSubmit={handleSubmit}
     >

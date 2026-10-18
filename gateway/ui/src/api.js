@@ -106,6 +106,17 @@ export function uploadFile(file, onProgress) {
   });
 }
 
+// The shared Qwen3.8 server's state (stopped/starting/ready) -- polled by
+// Qwen38GenerateForm.jsx. Warming it up starts the server without a prompt.
+export function getQwen38Server() {
+  return getJSON('/v1/qwen38/server');
+}
+
+export async function warmQwen38Server() {
+  const response = await request('/v1/qwen38/server/warm', { method: 'POST' });
+  return response.json();
+}
+
 export function getHealth() {
   return getJSON('/v1/health');
 }

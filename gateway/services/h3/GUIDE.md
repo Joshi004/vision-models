@@ -27,7 +27,7 @@ service adds two more models that are not in the open weights and therefore not 
 
 | | LTX-2.3 (`/v1/ltx`) / LTX-2.5 (`/v1/ltx25`) | MiniMax H3 (`/v1/h3`) |
 |---|---|---|
-| GPUs per job | 1 | **2** on one node (the encoder on one, the transformer on the other) |
+| GPUs per job | 1 | **4 or 8** on one node, chosen per request from its size (section 6) |
 | Prompt | free prose; optional `enhance_prompt` | a structured format (section 4), never rewritten |
 | Guidance | `negative_prompt` on some recipes | none -- the weights are guidance-distilled, one forward pass per step |
 | Resolution | up to 1920x1088 | 768 px short edge: 1344x768 landscape, 768x1344 portrait |
@@ -169,23 +169,52 @@ fills the list from the old field.
 
 Identical to the other backends: submit, poll `GET /v1/jobs/{job_id}` every 10-15 seconds, then download
 `GET /v1/jobs/{job_id}/result`. Every request is an independent cold start -- there is no warm model between
-requests -- on **two H100s on one node**: the Qwen3-VL-32B encoder (62 GiB of bf16 weights) on one and the 33B
-transformer (61.7 GiB) on the other, both loaded at the same time. When the encoder is done, half of the transformer's
-blocks move to its GPU, so the two GPUs share the generation. The weights are read from network storage on every
-job, so most of a short job's wall time is loading.
+requests -- on **4 or 8 H100s on one node**, chosen when you submit (see "How a request is sized" below). While the
+prompt and references are read, the Qwen3-VL-32B encoder (62 GiB of bf16 weights) is split over two of the GPUs and the
+33B transformer (61.7 GiB) sits on the first. Then the transformer is copied to every GPU and **all of them compute
+every denoising step together**, each on its own share of the token sequence ("ulysses" context parallelism), so the
+more GPUs, the less activation memory each one needs and the faster each step runs. The weights are read from network
+storage on every job, so most of a short job's wall time is loading (about 5 minutes when one job loads, longer when
+several load at once).
 
-**Timing has not been measured on this cluster yet.** Budget more than 10 minutes per request until real runs have
-replaced this paragraph; `typical_run_seconds` on a job starts from a pessimistic guess and switches to the median of
-real runs by itself. Larger canvases and longer clips cost far more than linearly (diffusers' documentation: 960x544 is
-about 2.3x faster per step than 1344x768).
+**How many GPUs, and how long.** The submit response and `GET /v1/jobs/{job_id}` (and `GET /v1/jobs`) carry two numbers
+that only this backend sets: `gpus`, how many GPUs the job was given, and `estimated_run_seconds`, about how long it
+will run once it starts (the queue wait is not included). The web UI shows both. The estimate is worked out from the
+request's size; it is a rough "about" figure from formulas that are still being calibrated, not a promise, and
+`typical_run_seconds` (the median of earlier runs) stays alongside it.
 
-**GPU memory.** With the whole transformer on one 80 GB card, a 345-frame (14.4 s) clip at the full 1344x768 canvas ran
-out of memory, while 124 frames fit. Sharing the transformer between the two GPUs gives each about 45 GiB for the
-activations, which is meant to fix that, but **a full-size 14.4 s clip has not been confirmed to complete yet**. If a job
-fails with an out-of-memory error, retry with a smaller canvas (for example `height` 544, `width` 960) or a shorter
-`duration_seconds`. Every reference adds to what the transformer holds (images are encoded at a 2048 px short edge, and
-a video adds frames up to the output's length), so a request near the **12-reference maximum has not been run on this
-cluster and may run out of memory** the same way; if it does, send fewer references or use a smaller canvas.
+**How a request is sized.** Before anything is queued, the server works out, from the request and the headers of the
+files you uploaded (nothing is decoded):
+
+- the **text-encoder tokens**: the prompt (about one token per 3.5 characters) plus every reference. A reference image
+  is read at a 2048 px short edge, so one image is several thousand tokens (two 1696x2528 images are about 12,000); a
+  reference video is read at 2 frames per second, one canvas worth of tokens per second of video; audio adds almost none;
+- the **rows of the denoising sequence**: those tokens, plus the reference images and videos as pictures, the audio
+  (80 rows per second), and the video being made (5n+2 latent frames of 1/32 of the canvas's width by height for a
+  17n+5 frame clip).
+
+It then picks the **smallest of 4 or 8 GPUs** for which each GPU's share of the rows is within the limit (40,000 rows
+per GPU to start with) and the estimated run time is within the job time limit. A valid request that fits on no
+setting -- more than 60,000 encoder tokens, too many rows even for 8 GPUs, or a time over the limit -- is **refused
+with HTTP 422** whose `detail` is one sentence with the numbers and what to change (a shorter video, a smaller canvas,
+fewer or smaller references). No job is created. All of these limits are **initial guesses**.
+
+**Numbers kept for calibration.** For every finished H3 job the server appends one line of numbers to its own usage
+log: the sizing, the stage timings, peak memory per GPU, the token and row counts, and (for a failure) the stage and the
+out-of-memory sizes. It never records the prompt, file names or asset ids (a job submitted with `incognito: true` is
+recorded the same way, without its job id).
+
+**Timing has not been measured on this cluster for the 4- and 8-GPU layout yet.** Budget more than 10 minutes per
+request. Larger canvases and longer clips cost far more than linearly (diffusers' documentation: 960x544 is about 2.3x
+faster per step than 1344x768).
+
+**GPU memory.** On the earlier two-GPU layout, a 345-frame (14.4 s) clip at the full 1344x768 canvas ran out of memory
+with the whole transformer on one card, and a 10 s request with two large reference images ran the **text encoder** out
+of memory (it keeps every layer's output, about 0.63 MiB per token). The 4- and 8-GPU layout is meant to fix both -- the
+encoder is split over two GPUs and the denoising sequence over all of them -- but **it has not been run on this cluster
+yet, and the limits above are guesses**, so a request near them may still run out of memory. If a job fails with an
+out-of-memory error, retry with a smaller canvas (for example `height` 544, `width` 960), a shorter `duration_seconds`,
+or fewer or smaller references.
 
 ### 7. Licence and responsible use
 

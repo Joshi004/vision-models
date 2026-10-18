@@ -66,6 +66,10 @@ TAGS_METADATA = [
         "description": "Speech-to-text for an existing recording (or a video's audio track), with word- and segment-level timestamps.",
     },
     {
+        "name": "Text model",
+        "description": "Text in, text or schema-valid JSON out (Qwen3.8-27B, with optional reasoning). Answered by one shared, warm model server instead of a GPU job per request.",
+    },
+    {
         "name": "Jobs",
         "description": "Poll status, download the result, cancel, or permanently delete a job submitted by any backend's generation endpoint.",
     },
@@ -199,6 +203,11 @@ figure for this exact pipeline -- the median of recent successful runs once
 enough history exists, otherwise a documented per-backend estimate. Context
 for the elapsed time you can already compute from `created_at`/`started_at`,
 not a guarantee.
+
+`gpus` and `estimated_run_seconds` are set by a backend that sizes each request before queueing it
+(MiniMax H3 today; `null` for every other backend): how many GPUs the job was given, and about how long it will
+run once it starts (the queue wait is not included). Prefer `estimated_run_seconds` over `typical_run_seconds`
+when present -- it accounts for this request's own size. A rough figure from formulas still being calibrated.
 
 `progress` gives live, best-effort detail while `status` is `"running"`, for the
 subset of backends that report it (see `GET /v1/guide` for which) -- e.g. which

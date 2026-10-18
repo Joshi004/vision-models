@@ -131,6 +131,24 @@ class JobSubmitResponse(BaseModel):
 
     job_id: str = Field(..., description="Id to poll GET /v1/jobs/{job_id} and later download GET /v1/jobs/{job_id}/result.", examples=["6b54a0bd6cef4b04abe50a8f81f55a80"])
     status: str = Field(..., description="Always 'queued' immediately after submission.", examples=["queued"])
+    gpus: int | None = Field(
+        None,
+        description=(
+            "How many GPUs this job was given, chosen from the size of the request. Only backends that size "
+            "their jobs report it (MiniMax H3 today); null for every other backend."
+        ),
+        examples=[4],
+    )
+    estimated_run_seconds: float | None = Field(
+        None,
+        description=(
+            "Estimated seconds this job will run once it starts (loading the model through writing the video; "
+            "the time waiting in the queue is not included), worked out from the size of the request. A rough "
+            "'about' figure from formulas that are still being calibrated, not a promise. Only backends that "
+            "size their jobs report it (MiniMax H3 today); null for every other backend."
+        ),
+        examples=[805.0],
+    )
 
 
 class JobStage(BaseModel):
@@ -318,6 +336,26 @@ class JobStatusResponse(BaseModel):
             "fallback)."
         ),
         examples=["median of 5 recent run(s)"],
+    )
+    gpus: int | None = Field(
+        None,
+        description=(
+            "How many GPUs this job was given (decided when it was submitted, from the size of the request). "
+            "Only backends that size their jobs report it (MiniMax H3 today); null for every other backend "
+            "and for jobs submitted before this field existed."
+        ),
+        examples=[4],
+    )
+    estimated_run_seconds: float | None = Field(
+        None,
+        description=(
+            "The estimate, made when the job was submitted, of how long it runs once it starts (the queue wait "
+            "is not included). Prefer it over typical_run_seconds when present: it accounts for this request's "
+            "own size, where typical_run_seconds is the median of whatever ran before. A rough 'about' figure from "
+            "formulas that are still being calibrated. Only backends that size their jobs report it (MiniMax H3 "
+            "today); null for every other backend and for older jobs."
+        ),
+        examples=[805.0],
     )
     progress: JobProgress | None = Field(
         None,

@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { formatDuration } from '../utils.js';
 import { RequiredLegend } from './FieldLabel.jsx';
 import Button from './ui/Button.jsx';
 import { useToast } from './ui/Toast.jsx';
@@ -18,6 +19,14 @@ import { useToast } from './ui/Toast.jsx';
 // On every *new* successful submission (lastJobId changing to a fresh,
 // non-null value), this remembers the form's current settings
 // (rememberSettings, from useFormState) and raises a confirmation toast.
+// " -- 4 GPUs, est. ~13m 25s once started" for the backends that size their jobs (H3); nothing for the rest.
+function sizingText(result) {
+  if (result?.gpus == null) return '';
+  const estimate =
+    result.estimated_run_seconds != null ? `, est. ~${formatDuration(result.estimated_run_seconds)} once started` : '';
+  return ` \u2014 ${result.gpus} GPUs${estimate}`;
+}
+
 export default function FormShell({
   title,
   description,
@@ -31,6 +40,7 @@ export default function FormShell({
   submitting,
   error,
   lastJobId,
+  lastResult = null,
   submitLabel = 'Generate',
   submittingLabel = 'Submitting\u2026',
   onSubmit,
@@ -103,7 +113,12 @@ export default function FormShell({
           </details>
         )}
         {error && <p className="text-sm text-danger">{error}</p>}
-        {lastJobId && <p className="text-sm text-success">Submitted: job_id {lastJobId}</p>}
+        {lastJobId && (
+          <p className="text-sm text-success">
+            Submitted: job_id {lastJobId}
+            {sizingText(lastResult)}
+          </p>
+        )}
         <div className="flex flex-wrap items-center gap-3 pb-3">
           <Button type="submit" disabled={submitting || blockers.length > 0}>
             {submitting ? submittingLabel : submitLabel}

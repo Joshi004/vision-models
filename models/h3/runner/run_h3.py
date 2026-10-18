@@ -11,14 +11,19 @@ Must be run with this model's own environment
 (`$VISION_DATA_DIR/envs/h3/bin/python`): diffusers 0.41 (its MiniMax-H3 modular
 pipeline), transformers 5.x and torch only exist there.
 
-TWO GPUS PER JOB. The Slurm job holds two GPUs and this script uses both, the
-way diffusers' own MiniMax-H3 documentation splits the pipeline "with two
-cards, nothing offloaded":
+SEVERAL GPUS PER JOB (--gpus N: 4 or 8 for ulysses, which is what the gateway
+always asks for; 2 is the older two-GPU layout). The Slurm job holds N GPUs on one
+node, g0 .. g(N-1) in CUDA_VISIBLE_DEVICES order, and this script uses all of
+them, splitting the pipeline the way diffusers' own MiniMax-H3 documentation does
+("with two cards, nothing offloaded") and then using every GPU for denoising:
 
   * the conditioning half -- media preparation plus the Qwen3-VL-32B text/vision
-    encoder (62 GiB of bf16 weights) -- runs in a CHILD process on the second GPU;
+    encoder (62 GiB of bf16 weights) -- runs in a CHILD process on g1 and g2 (with
+    2 GPUs only g1): from N = 4 up the encoder's 64 decoder layers are split between
+    two GPUs (layers 0-31 on g1, 32-63 on g2, see `split_text_encoder`), which leaves
+    room for the tokens of many large reference images;
   * the generation half -- reference/keyframe VAE encoding, the 33B transformer
-    (61.7 GiB), and the video/audio decode -- runs in THIS process on the first.
+    (61.7 GiB), and the video/audio decode -- runs in THIS process on g0 (rank 0).
 
 Both halves load their weights at the same time (two processes, so the two
 sets of weights are read from disk in parallel -- threads would not be safe,
@@ -26,37 +31,40 @@ because accelerate's weight-loading context patches torch globally). When the
 child is done it hands the small
 conditioning result (the text embedding and the resolved canvas/frame
 count/keyframes/references) over as one file in --work-dir, and exits, which
-frees its GPU.
+frees its GPUs.
 
-That freed GPU is then used a second time, for denoising, in one of two ways
-(--parallelism, which the gateway sets from its H3_PARALLELISM; default auto):
+The freed GPUs are then used, together with the others, for denoising
+(--parallelism, which the gateway always sets to ulysses):
 
-  * auto (default): ulysses for a video of up to 10 s (243 frames), split for a longer one. Decided
-    per job from the length, see `choose_parallelism`.
-  * ulysses: BOTH GPUs compute every denoising step. Each holds the whole
-    transformer (61.7 GiB; the first GPU's copy is sent straight to the second GPU
-    over NCCL, nothing is read from disk again) and runs half of the packed token
-    sequence through every block; around each attention layer the two exchange their
-    halves of the queries/keys/values (diffusers' "Ulysses" context parallelism, see
-    `enable_parallel_denoiser`). The second GPU is driven by a second copy of this
-    script (`--stage denoise-worker`, see `run_denoise_worker_stage`), started
-    together with the encoder, which runs the same loop on the other half. Both ranks
-    end up with the full denoised latents; rank 0 decodes them. The price is memory:
-    about 17 GiB per GPU is left for activations (each GPU sees half of the tokens),
-    so a very long clip, a large canvas or many references can run out of memory --
-    use split for those.
-  * split: the transformer's 50 blocks are divided, blocks 0-24 stay on the first GPU
-    and blocks 25-49 move to the second (see `split_transformer`). Each GPU then holds
-    about 31 GiB of weights, so a long clip at the full 1344x768 canvas (345 frames is
-    ~103k tokens) has ~45 GiB per GPU for activations, where one GPU holding all
-    61.7 GiB ran out of memory. The blocks still run one after another, so each GPU
-    waits while the other computes; per denoising step the hidden states cross between
-    the GPUs once each way, plus a copy of the (~0.1 GB) rotary table for each moved
-    block, which costs seconds over a whole job.
+  * ulysses (default): ALL N GPUs compute every denoising step. Each holds the whole
+    transformer (61.7 GiB; g0's copy is broadcast straight to the other GPUs over
+    NCCL, nothing is read from disk again) and runs 1/N of the packed token sequence
+    through every block; around each attention layer the GPUs exchange their parts of
+    the queries/keys/values (diffusers' "Ulysses" context parallelism, see
+    `enable_parallel_denoiser`). Ranks 1 .. N-1 are driven by copies of this script
+    (`--stage denoise-worker --rank r`, see `run_denoise_worker_stage`), started
+    together with the encoder, each running the same loop on its own part. Every rank
+    ends up with the full denoised latents; rank 0 decodes them. Memory: every GPU
+    holds the whole transformer, so about 15 GiB per GPU is left for activations, but
+    each GPU only sees 1/N of the tokens, so N GPUs take N times the rows of one.
+  * split (2 GPUs only; an operator fallback): the transformer's 50 blocks are divided,
+    blocks 0-24 stay on the first GPU and blocks 25-49 move to the second (see
+    `split_transformer`). Each GPU then holds about 31 GiB of weights, so a long clip
+    at the full 1344x768 canvas (345 frames is ~103k tokens) has ~45 GiB per GPU for
+    activations, where one GPU holding all 61.7 GiB ran out of memory. The blocks still
+    run one after another, so each GPU waits while the other computes; per denoising
+    step the hidden states cross between the GPUs once each way, plus a copy of the
+    (~0.1 GB) rotary table for each moved block, which costs seconds over a whole job.
 
 Output quality does not depend on any of this: the same bf16 weights run the
 same computation as on one big GPU (ulysses differs from it only by floating-point
 rounding in the exchange of the attention inputs).
+
+Numbers for calibration: with --metrics-dir, every process writes `metrics.<role>.json`
+there (the gateway passes the job folder): stage timings, peak GPU memory per GPU, the
+encoder's token count, the packed sequence's length and, on failure, the stage that
+failed (see `Metrics`). Only numbers and stage names -- never the prompt or any media.
+The gateway merges these files into its usage log.
 
 Three workflows, matching diffusers' (`pipe.blocks.available_workflows`):
   t2va  : text only                       -> `transformer/` partition ("FL2VA" checkpoint)
@@ -70,7 +78,8 @@ Usage:
         [--reference-image FILE ...] [--reference-video FILE ...] [--mute-reference-video N ...] \\
         [--reference-audio FILE ...] \\
         [--height N --width N] [--num-frames N | --match-audio-duration] [--max-seconds S] \\
-        [--steps N] [--seed N] [--attention-backend NAME] [--parallelism auto|ulysses|split]
+        [--steps N] [--seed N] [--attention-backend NAME] \\
+        [--gpus 2|4|8] [--parallelism ulysses|split] [--metrics-dir DIR]
 
 --prompt is passed as `--prompt=value` (not `--prompt value`) so a value starting
 with "-" is never mistaken for an option. Nothing here goes through a shell, so
@@ -100,7 +109,10 @@ printed is `ERROR: ...` with the root cause.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -132,17 +144,21 @@ OUTPUTS = ["videos", "audio", "sampling_rate"]
 # denoising and the rest run on the conditioning GPU, which is idle once the encoder's process has exited.
 SPLIT_AT = 25
 
-# How the two GPUs share the denoising (see the module docstring). The gateway passes its H3_PARALLELISM setting.
-# "auto" picks one of the other two per request, from the video's length.
-PARALLELISM_MODES = ("auto", "ulysses", "split")
-DEFAULT_PARALLELISM = "auto"
-# --parallelism auto: videos up to this long use ulysses, longer ones split (they need the memory split leaves free).
-ULYSSES_MAX_SECONDS = 10
+# How the job's GPUs share the denoising (see the module docstring). The gateway always passes ulysses.
+PARALLELISM_MODES = ("ulysses", "split")
+DEFAULT_PARALLELISM = "ulysses"
+# --gpus: how many of the job's GPUs this run uses. 2 is the older layout (encoder on one GPU); from 4 up the encoder is
+# split across two GPUs. Ulysses needs a degree that divides the transformer's 56 attention heads: 2, 4 and 8 all do.
+GPU_OPTIONS = (2, 4, 8)
+DEFAULT_GPUS = 2
+# The encoder (Qwen3-VL-32B) has 64 decoder layers; when it has two GPUs, layers [0, SPLIT) go to the first, the rest
+# (and the final norm) to the second.
+TEXT_ENCODER_SPLIT_AT = 32
 
-# --parallelism ulysses: a second process (the "denoise worker") runs the same denoising loop on the conditioning GPU.
-WORLD_SIZE = 2  # this process (rank 0, generation GPU) and the denoise worker (rank 1, conditioning GPU)
-ENCODED_NAME = "h3_encoded.pt"  # reference/keyframe latents, handed from rank 0 to the worker
-WORKER_ERROR_NAME = "h3_worker_error.txt"
+# --parallelism ulysses: ranks 1 .. gpus-1 ("denoise workers", one extra process each) run the same denoising loop as
+# this process (rank 0, on g0), each on cuda:<rank> = the job's GPU number <rank>.
+ENCODED_NAME = "h3_encoded.pt"  # reference/keyframe latents, handed from rank 0 to the workers
+WORKER_ERROR_NAME = "h3_worker_error_{rank}.txt"
 DIST_PORT_ENV = "H3_DIST_PORT"  # localhost port of the rendezvous store, chosen by rank 0
 # The worker is started together with the encoder and waits for rank 0 to open the store, which only happens after
 # the weights are loaded, the encoder is done and the references are encoded.
@@ -156,6 +172,203 @@ _STARTED = time.time()
 
 def log(tag: str, message: str) -> None:
     print(f"[{time.time() - _STARTED:6.0f}s {tag}] {message}", flush=True)
+
+
+_SIZE = r"([\d.]+) (MiB|GiB)"
+_OOM_PATTERNS = {
+    "tried_mib": r"Tried to allocate " + _SIZE,
+    "total_mib": r"total capacity of " + _SIZE,
+    "free_mib": r"of which " + _SIZE + r" is free",
+    "in_use_mib": r"this process has " + _SIZE + r" memory in use",
+    "allocated_mib": _SIZE + r" is allocated by PyTorch",
+}
+
+
+def oom_numbers(message: str) -> dict:
+    """The figures in a CUDA out-of-memory message, all in MiB (plus which GPU), or {} for any other message."""
+    if "out of memory" not in message:
+        return {}
+    numbers: dict = {}
+    for key, pattern in _OOM_PATTERNS.items():
+        found = re.search(pattern, message)
+        if found:
+            numbers[key] = round(float(found.group(1)) * (1024 if found.group(2) == "GiB" else 1), 1)
+    gpu = re.search(r"GPU (\d+) has a total capacity", message)
+    if gpu:
+        numbers["gpu"] = int(gpu.group(1))
+    return numbers
+
+
+class Metrics:
+    """Numbers about one process of a run, for the gateway's usage log: stage timings, peak GPU memory, token and row
+    counts and, when it fails, the stage and (for an out-of-memory error) the sizes. Written to
+    `<--metrics-dir>/metrics.<role>.json` after every change, atomically, so a process that is killed (a Slurm time
+    limit, an out-of-memory kill) still leaves what it had measured, with `current_stage` saying where it was.
+
+    Only numbers and stage names go in: never the prompt, file names or media, and not even the error message
+    (only its type and the out-of-memory sizes). Without --metrics-dir nothing is written. A failure to write is
+    ignored: these numbers must never fail a job."""
+
+    def __init__(self, directory: Path | None, role: str):
+        self.path = None if directory is None else Path(directory) / f"metrics.{role}.json"
+        self.current: str | None = None
+        self._lock = threading.RLock()
+        self.data: dict = {"schema": 1, "role": role, "outcome": "running", "timings_s": {}, "peak_gib": {}}
+        self.write()
+
+    def write(self) -> None:
+        if self.path is None:
+            return
+        with self._lock:
+            try:
+                partial = self.path.with_name(self.path.name + ".partial")
+                partial.write_text(json.dumps(self.data))
+                os.replace(partial, self.path)
+            except OSError:
+                pass
+
+    def update(self, **values) -> None:
+        with self._lock:
+            self.data.update(values)
+            self.write()
+
+    def timing(self, name: str, seconds: float) -> None:
+        with self._lock:
+            self.data["timings_s"][name] = round(seconds, 1)
+            self.write()
+
+    def peak(self, name: str, gib) -> None:
+        """Peak GPU memory in GiB: one number, or a list with one per GPU."""
+        with self._lock:
+            self.data["peak_gib"][name] = [round(g, 2) for g in gib] if isinstance(gib, (list, tuple)) else round(gib, 2)
+            self.write()
+
+    @contextlib.contextmanager
+    def stage(self, name: str):
+        """Times the block under `name`; if it raises, records the failure (see `fail`) against this stage."""
+        with self._lock:
+            self.current = name
+            self.data["current_stage"] = name
+            self.write()
+        started = time.time()
+        try:
+            yield
+        except BaseException as error:
+            self.fail(error)
+            raise
+        with self._lock:
+            self.current = None
+            self.data.pop("current_stage", None)
+            self.timing(name, time.time() - started)
+
+    def fail(self, error, source: str | None = None) -> None:
+        """Records the failure of the stage in progress (the first failure recorded wins). `error` is an exception, or the
+        text of one that happened in another process (`source`: which)."""
+        with self._lock:
+            if self.data["outcome"] == "failed":
+                return
+            message = error if isinstance(error, str) else str(error)
+            self.data["outcome"] = "failed"
+            self.data["failed_stage"] = self.current or self.data.get("current_stage") or "unknown"
+            self.data["error_type"] = message.split(":", 1)[0][:60] if isinstance(error, str) else type(error).__name__
+            if source:
+                self.data["failed_in"] = source
+            oom = oom_numbers(message)
+            if oom:
+                self.data["oom"] = oom
+            self.write()
+
+    def finish(self, ok: bool) -> None:
+        with self._lock:
+            if self.data["outcome"] != "failed":
+                self.data["outcome"] = "succeeded" if ok else "failed"
+                if not ok:
+                    self.data.setdefault("failed_stage", self.current or self.data.get("current_stage") or "unknown")
+            self.data.pop("current_stage", None)
+            self.data["total_s"] = round(time.time() - _STARTED, 1)
+            self.write()
+
+
+def describe_references(references) -> list[dict]:
+    """Kind and size of each (normalized) reference, as numbers: an image's pixels, a video's frames and pixels, an
+    audio file's seconds. Never raises: this is for the usage log only."""
+    described = []
+    try:
+        for reference in references or []:
+            entry: dict = {"kind": reference.kind}
+            if reference.kind == "image":
+                entry["width"], entry["height"] = reference.image.size
+            elif reference.kind == "video":
+                entry.update(
+                    frames=int(reference.frames.shape[0]),
+                    height=int(reference.frames.shape[1]),
+                    width=int(reference.frames.shape[2]),
+                    has_audio=bool(reference.has_audio),
+                )
+            else:
+                entry["seconds"] = round(reference.audio.shape[-1] / (reference.sample_rate or AUDIO_SAMPLE_RATE), 2)
+            described.append(entry)
+    except Exception:
+        return []
+    return described
+
+
+DEFAULT_STEPS = 50  # the pipeline's own number of denoising steps when --steps is not given
+
+
+def record_run_setup(metrics: Metrics, args: argparse.Namespace) -> None:
+    """The settings of this run and the machine, as numbers and short names (no prompt text, no file names). Never
+    raises: this is for the usage log only."""
+    try:
+        import diffusers
+        import torch
+
+        properties = torch.cuda.get_device_properties(0)
+        metrics.update(
+            workflow=args.workflow,
+            parallelism=args.parallelism,
+            gpus=args.gpus,
+            attention_backend=args.attention_backend,
+            steps=args.steps or DEFAULT_STEPS,
+            requested_height=args.height,
+            requested_width=args.width,
+            requested_frames=None if args.match_audio_duration else snap_num_frames(args.num_frames or DEFAULT_FRAMES),
+            match_audio_duration=args.match_audio_duration,
+            prompt_chars=len(args.prompt),
+            requested_references={
+                "images": len(args.reference_image),
+                "videos": len(args.reference_video),
+                "audios": len(args.reference_audio),
+                "keyframes": len([path for path in (args.first_frame, args.last_frame) if path is not None]),
+            },
+            node=socket.gethostname(),
+            gpu_model=properties.name,
+            gpu_total_gib=round(properties.total_memory / 2**30, 1),
+            torch_version=torch.__version__,
+            diffusers_version=diffusers.__version__,
+        )
+    except Exception:
+        pass
+
+
+def record_sequence_shape(model, metrics: Metrics) -> None:
+    """On the transformer's first denoising step, records the size of the packed sequence it is given: its rows in all
+    (`sequence_rows`) and how many of them are text, video (reference + generated) and audio rows. Removes itself after
+    that one call."""
+
+    def record(module, args, kwargs):
+        handle.remove()
+        try:
+            metrics.update(
+                sequence_rows=int(kwargs["position_ids"].shape[0]),
+                text_rows=int(kwargs["encoder_hidden_states"].shape[1]),
+                video_rows=int(kwargs["hidden_states"].shape[1]),
+                audio_rows=int(kwargs["audio_hidden_states"].shape[1]),
+            )
+        except Exception:
+            pass
+
+    handle = model.register_forward_pre_hook(record, with_kwargs=True)
 
 
 def snap_num_frames(num_frames: int) -> int:
@@ -231,19 +444,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--attention-backend", help="A diffusers attention backend name for the transformer (default: diffusers' own).")
     p.add_argument(
+        "--gpus",
+        type=int,
+        choices=GPU_OPTIONS,
+        default=DEFAULT_GPUS,
+        help="How many of the job's GPUs to use (the Slurm job must hold at least that many). With 4 or more, the text "
+        "encoder is split across two GPUs; every GPU takes part in the denoising (ulysses).",
+    )
+    p.add_argument(
         "--parallelism",
         choices=PARALLELISM_MODES,
         default=DEFAULT_PARALLELISM,
-        help="How the job's two GPUs share the denoising: 'ulysses' (both compute every step, each on half of the token "
-        "sequence; every GPU holds the whole transformer), 'split' (the blocks are divided between the GPUs and run "
-        "one after another; less memory per GPU, slower) or 'auto' (the default: ulysses for videos up to "
-        f"{ULYSSES_MAX_SECONDS} s, split for longer ones).",
+        help="How the GPUs share the denoising: 'ulysses' (the default: all of them compute every step, each on its share "
+        "of the token sequence; every GPU holds the whole transformer) or 'split' (2 GPUs only: the blocks are divided "
+        "between them and run one after another; less memory per GPU, slower).",
     )
-    # Internal: the conditioning half and (in ulysses mode) the second denoising process are this same script run as
+    p.add_argument(
+        "--metrics-dir",
+        type=Path,
+        help="Write metrics.<role>.json (timings, peak GPU memory, token counts; no prompt or media) into this directory.",
+    )
+    # Internal: the conditioning half and (in ulysses mode) the other denoising processes are this same script run as
     # child processes.
     p.add_argument("--stage", choices=["run", "condition", "denoise-worker"], default="run", help=argparse.SUPPRESS)
     p.add_argument("--handoff", type=Path, help=argparse.SUPPRESS)
+    p.add_argument("--rank", type=int, help=argparse.SUPPRESS)
     args = p.parse_args(argv)
+
+    if args.parallelism == "split" and args.gpus != 2:
+        p.error("--parallelism split divides the transformer between exactly 2 GPUs; use --gpus 2.")
 
     if (args.height is None) != (args.width is None):
         p.error("--height and --width must be given together.")
@@ -285,20 +514,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             p.error(f"Input file not found: {path}")
     if args.stage == "condition" and args.handoff is None:
         p.error("--stage condition needs --handoff.")
+    if args.stage == "denoise-worker" and (args.rank is None or not 1 <= args.rank < args.gpus):
+        p.error(f"--stage denoise-worker needs --rank between 1 and {args.gpus - 1}.")
     return args
 
 
-def pick_gpus() -> tuple[str, str]:
-    """(generation GPU, conditioning GPU) as they are named in CUDA_VISIBLE_DEVICES,
-    which Slurm sets to the job's own GPUs. Without it, the first two on the node."""
+def pick_gpus(gpus: int) -> list[str]:
+    """The first `gpus` GPUs as they are named in CUDA_VISIBLE_DEVICES, which Slurm sets to the job's own GPUs.
+    Without it, the first `gpus` on the node. g0 is the generation GPU (rank 0); g1 (and g2 when the encoder has two
+    GPUs) run the encoder first and become denoising ranks 1 (and 2) afterwards."""
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
-    ids = [item.strip() for item in visible.split(",") if item.strip()] if visible else ["0", "1"]
-    if len(ids) < 2:
+    ids = [item.strip() for item in visible.split(",") if item.strip()] if visible else [str(i) for i in range(gpus)]
+    if len(ids) < gpus:
         raise RuntimeError(
-            f"MiniMax H3 needs 2 GPUs per job (one for the text/vision encoder, one for the transformer), "
-            f"but only {len(ids)} is visible (CUDA_VISIBLE_DEVICES={visible!r})."
+            f"This MiniMax H3 run needs {gpus} GPUs (the text/vision encoder on the first ones after g0, the "
+            f"transformer on g0), but only {len(ids)} is visible (CUDA_VISIBLE_DEVICES={visible!r})."
         )
-    return ids[0], ids[1]
+    return ids[:gpus]
+
+
+def encoder_gpu_count(gpus: int) -> int:
+    """GPUs the text/vision encoder gets: two from 4 GPUs up (62 GiB of weights plus activations that grow with the
+    tokens of the reference images), else one."""
+    return 2 if gpus >= 4 else 1
 
 
 def check_weights(model_dir: Path, workflow: str) -> None:
@@ -503,10 +741,11 @@ def load_onto_generation_gpu(pipeline) -> None:
     log("run", f"transformer and VAEs on the GPU in {time.time() - started:.0f}s")
 
 
-def prepare_job(args: argparse.Namespace) -> tuple[str, str, Path, Path]:
-    """Checks and scratch files shared by both parallelism modes; returns (generation GPU, conditioning GPU,
+def prepare_job(args: argparse.Namespace) -> tuple[list[str], list[str], Path, Path]:
+    """Checks and scratch files shared by both parallelism modes; returns (the job's GPU ids, the encoder's GPU ids,
     conditioning handoff file, its error file). Must run before torch is imported."""
-    generation_gpu, conditioning_gpu = pick_gpus()
+    gpu_ids = pick_gpus(args.gpus)
+    encoder_gpus = gpu_ids[1 : 1 + encoder_gpu_count(args.gpus)]
     check_weights(args.model_dir, args.workflow)
     args.work_dir.mkdir(parents=True, exist_ok=True)
     args.output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -515,20 +754,20 @@ def prepare_job(args: argparse.Namespace) -> tuple[str, str, Path, Path]:
     handoff.unlink(missing_ok=True)
     error_file.unlink(missing_ok=True)
 
-    # This process sees both GPUs: the generation GPU as cuda:0 and the conditioning GPU as cuda:1. Nothing here
-    # touches cuda:1 until the child (which sees only the conditioning GPU, as its cuda:0, see the Popen env below)
-    # has exited. This must happen before torch is imported.
-    os.environ["CUDA_VISIBLE_DEVICES"] = f"{generation_gpu},{conditioning_gpu}"
+    # This process sees all the job's GPUs: g0 as cuda:0, g1 as cuda:1 and so on (rank r of a ulysses job is cuda:r).
+    # Nothing here touches cuda:1 and up until the encoder child (which sees only its own GPUs, as its cuda:0 and
+    # cuda:1, see the Popen env below) has exited. This must happen before torch is imported.
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(gpu_ids)
     # Less fragmentation while 60 GB models are moved on and off the GPU.
     os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
-    log("run", f"generation GPU {generation_gpu}, conditioning GPU {conditioning_gpu}")
-    return generation_gpu, conditioning_gpu, handoff, error_file
+    log("run", f"GPUs {','.join(gpu_ids)}: generation GPU {gpu_ids[0]}, text encoder on {','.join(encoder_gpus)}")
+    return gpu_ids, encoder_gpus, handoff, error_file
 
 
-def spawn_condition_child(handoff: Path, conditioning_gpu: str) -> subprocess.Popen:
+def spawn_condition_child(handoff: Path, encoder_gpus: list[str]) -> subprocess.Popen:
     return subprocess.Popen(
         [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:], "--stage", "condition", "--handoff", str(handoff)],
-        env={**os.environ, "CUDA_VISIBLE_DEVICES": conditioning_gpu},
+        env={**os.environ, "CUDA_VISIBLE_DEVICES": ",".join(encoder_gpus)},
     )
 
 
@@ -559,7 +798,7 @@ def finish_job(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# The conditioning half (child process, second GPU).
+# The conditioning half (child process, the GPU(s) after g0).
 # ---------------------------------------------------------------------------
 
 
@@ -614,23 +853,116 @@ def conditioning_inputs(args: argparse.Namespace) -> dict:
     return inputs
 
 
-def run_condition_stage(args: argparse.Namespace) -> int:
+def record_conditioning_numbers(metrics: Metrics, values: dict) -> None:
+    """What the conditioning step resolved, as numbers: the encoder's token count (the rows of the text embedding), the
+    canvas and frame count, and the references' sizes. Never raises: this is for the usage log only."""
+    try:
+        def as_int(value):
+            return None if value is None else int(value)
+
+        embeds = values.get("prompt_embeds")
+        keyframes = values.get("keyframes")
+        metrics.update(
+            encoder_tokens=None if embeds is None else int(embeds.shape[1]),
+            num_frames=as_int(values.get("num_frames")),
+            height=as_int(values.get("height")),
+            width=as_int(values.get("width")),
+            references=describe_references(values.get("normalized_references")),
+            keyframes=0 if keyframes is None else len(keyframes),
+        )
+    except Exception:
+        pass
+
+
+def split_text_encoder(
+    text_encoder, split_at: int = TEXT_ENCODER_SPLIT_AT, first_device: str = "cuda:0", second_device: str = "cuda:1"
+) -> int:
+    """Place the Qwen3-VL text/vision encoder on two GPUs: the vision tower, the token embeddings and decoder layers
+    [0, split_at) on `first_device`, decoder layers [split_at, 64) and the final norm on `second_device`. Returns the
+    number of layers on the second GPU.
+
+    Why: the encoder reads the request's prompt and every reference image as one sequence (a 2048 px short edge makes
+    4,000-8,000 tokens per image), and it keeps the output of every one of its 64 layers (about 0.63 MiB per token)
+    on top of its 62 GiB of weights, so on one 80 GB GPU two portrait images already ran it out of memory. Two GPUs
+    hold half the weights and half the per-layer outputs each.
+
+    The model's top-level `device` (what the offload manager compares with its execution device, see
+    `get_qwen3vl_prompt_embeds`) is that of its first parameter, the vision tower on `first_device`, so the manager
+    does not try to move the encoder back onto one GPU. Placed by hand, like `split_transformer`: the layers still run
+    one after another and the result is the same; a forward pre-hook on each layer from `split_at` on carries its
+    arguments (the hidden states, the rotary tables, the attention mask) over to `second_device`. The embedding and the
+    `lm_head` (which this pipeline never calls) are not on the second GPU; the head stays in host memory."""
+    from accelerate.utils import send_to_device
+
+    language_model = text_encoder.model.language_model
+    layers = language_model.layers
+    if not 0 < split_at < len(layers):
+        raise ValueError(f"Cannot split the text encoder's {len(layers)} layers at {split_at}.")
+
+    text_encoder.model.visual.to(first_device)
+    language_model.embed_tokens.to(first_device)
+    language_model.rotary_emb.to(first_device)
+    for layer in layers[:split_at]:
+        layer.to(first_device)
+    for layer in layers[split_at:]:
+        layer.to(second_device)
+    language_model.norm.to(second_device)
+
+    def move_inputs(module, args, kwargs):
+        return send_to_device(args, second_device), send_to_device(kwargs, second_device)
+
+    # On every layer of the second GPU, not just the first: the language model's loop hands each layer the rotary
+    # tables and the attention mask from the first GPU again (only the hidden states chain from layer to layer), so
+    # each of these layers has to bring them over itself. (Already-moved tensors are returned as they are.)
+    for layer in layers[split_at:]:
+        layer.register_forward_pre_hook(move_inputs, with_kwargs=True)
+
+    # Everything the forward pass touches must be on a GPU now, and the model must report the first one, or the
+    # offload manager would move the whole encoder onto it (and run it out of memory) when the encoder is first used.
+    not_placed = [name for name, parameter in text_encoder.model.named_parameters() if parameter.device.type != "cuda"]
+    if not_placed:
+        raise RuntimeError(f"The text encoder was not fully placed on the GPUs; still on the CPU: {not_placed[:3]}")
+    if str(text_encoder.device) != first_device:
+        raise RuntimeError(f"The text encoder reports device {text_encoder.device}, expected {first_device}.")
+    return len(layers) - split_at
+
+
+def run_condition_stage(args: argparse.Namespace, metrics: Metrics) -> int:
     import torch
 
     error_file = args.handoff.with_name(HANDOFF_ERROR_NAME)
     try:
         allow_any_length()
         blocks, _ = split_workflow(args.model_dir, args.workflow)
-        inputs = conditioning_inputs(args)
+        with metrics.stage("prepare_media"):
+            inputs = conditioning_inputs(args)
         log("condition", "loading the text/vision encoder")
         pipeline, seconds = make_pipeline(blocks, args.model_dir, "cuda:0")
-        log("condition", f"set up in {seconds:.0f}s (the weights are read from disk when the encoder first moves onto the GPU)")
+        metrics.timing("setup", seconds)
+        gpus = torch.cuda.device_count()  # the GPUs the parent gave this child: one, or two for a 4+ GPU job
+        metrics.update(encoder_gpus=gpus, gpu_total_gib=round(torch.cuda.get_device_properties(0).total_memory / 2**30, 1))
+        if gpus >= 2:
+            # Reads the weights from disk onto the two GPUs now (this is the slow part), instead of on first use.
+            with metrics.stage("load_encoder"):
+                moved = split_text_encoder(pipeline.text_encoder)
+            log(
+                "condition",
+                f"set up in {seconds:.0f}s; text encoder split across 2 GPUs (layers 0-{TEXT_ENCODER_SPLIT_AT - 1} / "
+                f"{TEXT_ENCODER_SPLIT_AT}-{TEXT_ENCODER_SPLIT_AT + moved - 1}) and loaded in "
+                f"{metrics.data['timings_s']['load_encoder']:.0f}s",
+            )
+        else:
+            log("condition", f"set up in {seconds:.0f}s (the weights are read from disk when the encoder first moves onto the GPU)")
 
         names = [output.name for output in blocks.intermediate_outputs]
         started = time.time()
-        values = pipeline(output=names, **inputs)
+        with metrics.stage("encode"):
+            values = pipeline(output=names, **inputs)
         log("condition", f"encoded in {time.time() - started:.0f}s: {sorted(values)}")
-        log("condition", f"peak GPU memory {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB")
+        peaks = [torch.cuda.max_memory_allocated(index) / 2**30 for index in range(gpus)]
+        log("condition", "peak GPU memory " + ", ".join(f"GPU {index} {peak:.1f} GiB" for index, peak in enumerate(peaks)))
+        metrics.peak("encoder", peaks)
+        record_conditioning_numbers(metrics, values)
 
         # Plain CPU values, so the other process (a different GPU) can read them, plus which of them were on the GPU.
         partial = args.handoff.with_name(args.handoff.name + ".partial")
@@ -639,6 +971,7 @@ def run_condition_stage(args: argparse.Namespace) -> int:
         return 0
     except Exception as error:  # reported to the generation process through a file
         traceback.print_exc()
+        metrics.fail(error)
         error_file.write_text(f"{type(error).__name__}: {error}")
         print(f"ERROR: conditioning step failed: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
         return 1
@@ -674,23 +1007,26 @@ def split_transformer(model, second_device: str = "cuda:1", first_device: str = 
     return len(moved_blocks)
 
 
-def run_pipeline_split(args: argparse.Namespace) -> int:
+def run_pipeline_split(args: argparse.Namespace, metrics: Metrics) -> int:
     """--parallelism split: the transformer's blocks are divided between the two GPUs and run one after another."""
-    _, conditioning_gpu, handoff, error_file = prepare_job(args)
+    _, encoder_gpus, handoff, error_file = prepare_job(args)
     log("run", "parallelism: split (the transformer's blocks are divided between the GPUs)")
 
-    child = spawn_condition_child(handoff, conditioning_gpu)
+    child = spawn_condition_child(handoff, encoder_gpus)
     try:
         import torch
         from diffusers.utils.export_utils import encode_video
 
+        record_run_setup(metrics, args)
         allow_any_length()
         _, rest_blocks = split_workflow(args.model_dir, args.workflow)
         log("run", "loading the transformer and VAEs (while the encoder loads in the other process)")
         pipeline, seconds = make_pipeline(rest_blocks, args.model_dir, "cuda:0")
         log("run", f"set up in {seconds:.0f}s")
+        metrics.timing("setup", seconds)
         apply_attention_backend(pipeline, args.attention_backend)
-        load_onto_generation_gpu(pipeline)
+        with metrics.stage("load_gpu"):
+            load_onto_generation_gpu(pipeline)
 
         # The VAEs (~10 GiB, the video VAE is float32) are only used before denoising (encoding references and
         # keyframes) and after it (decoding). The offload manager makes room for a model's weights, never for
@@ -711,12 +1047,15 @@ def run_pipeline_split(args: argparse.Namespace) -> int:
             if isinstance(model, torch.nn.Module)
         )
         release_hook = denoiser.register_forward_pre_hook(release_vaes)
+        record_sequence_shape(denoiser, metrics)
 
-        wait_for_conditioning(child, error_file)
+        with metrics.stage("wait_encoder"):
+            wait_for_conditioning(child, error_file)
 
         # The child has exited, so the second GPU is free: the second half of the transformer goes there.
         started = time.time()
-        moved = split_transformer(denoiser)
+        with metrics.stage("split_transformer"):
+            moved = split_transformer(denoiser)
         log("run", f"transformer blocks {SPLIT_AT}-{SPLIT_AT + moved - 1} moved to the second GPU in {time.time() - started:.0f}s")
         # Count peaks from here on: the first GPU held the whole transformer until just now.
         torch.cuda.reset_peak_memory_stats(0)
@@ -726,22 +1065,26 @@ def run_pipeline_split(args: argparse.Namespace) -> int:
         kwargs = build_denoise_kwargs(args, conditioning, torch.device("cuda:0"))
 
         started = time.time()
-        results = pipeline(output=OUTPUTS, **kwargs)
+        with metrics.stage("generate"):  # reference encode, denoise and decode in one call
+            results = pipeline(output=OUTPUTS, **kwargs)
         frames = results["videos"][0]
         log("run", f"generated {len(frames)} frames of {frames[0].size[0]}x{frames[0].size[1]} in {time.time() - started:.0f}s")
+        peaks = [torch.cuda.max_memory_allocated(index) / 2**30 for index in range(2)]
         log(
             "run",
-            f"peak GPU memory since the split: generation GPU {torch.cuda.max_memory_allocated(0) / 2**30:.1f} GiB, "
-            f"second GPU {torch.cuda.max_memory_allocated(1) / 2**30:.1f} GiB",
+            f"peak GPU memory since the split: generation GPU {peaks[0]:.1f} GiB, second GPU {peaks[1]:.1f} GiB",
         )
+        metrics.peak("since_split", peaks)
+        metrics.update(output_frames=len(frames))
 
-        encode_video(
-            frames,
-            fps=FPS,
-            output_path=str(args.output_path),
-            audio=results["audio"][0],
-            audio_sample_rate=results["sampling_rate"],
-        )
+        with metrics.stage("mux"):
+            encode_video(
+                frames,
+                fps=FPS,
+                output_path=str(args.output_path),
+                audio=results["audio"][0],
+                audio_sample_rate=results["sampling_rate"],
+            )
     finally:
         if child.poll() is None:
             child.kill()
@@ -752,20 +1095,20 @@ def run_pipeline_split(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# --parallelism ulysses: both GPUs compute every denoising step.
+# --parallelism ulysses: all the job's GPUs compute every denoising step.
 #
-# Each GPU holds the whole transformer and runs half of the packed token sequence through every block; around each
-# attention layer the two exchange their halves of the queries, keys and values (diffusers' "Ulysses" context
+# Each GPU holds the whole transformer and runs 1/N of the packed token sequence through every block; around each
+# attention layer the GPUs exchange their parts of the queries, keys and values (diffusers' "Ulysses" context
 # parallelism; `MiniMaxH3Transformer3DModel._cp_plan` says how the sequence is split and gathered). This process is
-# rank 0 on the generation GPU. A second copy of this script (`--stage denoise-worker`) is rank 1 on the conditioning
-# GPU; the two talk through NCCL (`torch.distributed`), joined by a rendezvous store on a localhost port.
+# rank 0 on the generation GPU. Further copies of this script (`--stage denoise-worker --rank r`) are ranks 1 .. N-1 on
+# the job's other GPUs; they talk through NCCL (`torch.distributed`), joined by a rendezvous store on a localhost port.
 # ---------------------------------------------------------------------------
 
 
-def init_distributed(rank: int, port: int):
-    """Joins the two-process group. Rank 0 opens the rendezvous store (and returns once the worker has connected to
-    it); rank 1 connects to it, waiting as long as rank 0 needs to get ready. Each rank then takes its own GPU
-    (`cuda:<rank>`: rank 0 the generation GPU, rank 1 the conditioning GPU, in CUDA_VISIBLE_DEVICES order).
+def init_distributed(rank: int, port: int, world_size: int):
+    """Joins the `world_size`-process group. Rank 0 opens the rendezvous store (and returns once every worker has
+    connected to it); every other rank connects to it, waiting as long as rank 0 needs to get ready. Each rank then takes its own
+    GPU (`cuda:<rank>`: rank 0 the generation GPU, rank r the job's GPU number r, in CUDA_VISIBLE_DEVICES order).
 
     Returns the store, which must stay referenced for as long as the group is used."""
     import torch
@@ -774,15 +1117,16 @@ def init_distributed(rank: int, port: int):
     store = dist.TCPStore(
         "127.0.0.1",
         port,
-        WORLD_SIZE,
+        world_size,
         is_master=rank == 0,
         timeout=RENDEZVOUS_TIMEOUT if rank == 0 else CONNECT_TIMEOUT,
     )
-    # Only now touch the GPU: for rank 1 this point is reached after rank 0 has seen the encoder exit.
+    # Only now touch the GPU: for ranks 1 and 2 (the encoder's GPUs) this point is reached after rank 0 has seen the
+    # encoder exit.
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
     dist.init_process_group(
-        "nccl", store=store, rank=rank, world_size=WORLD_SIZE, timeout=COLLECTIVE_TIMEOUT, device_id=device
+        "nccl", store=store, rank=rank, world_size=world_size, timeout=COLLECTIVE_TIMEOUT, device_id=device
     )
     return store
 
@@ -794,8 +1138,8 @@ def transformer_tensors(model) -> list:
 
 
 def send_transformer(model, device) -> None:
-    """Rank 0 side of the weight copy: the shapes and dtypes first (the checkpoint is mixed precision, so the receiver
-    cannot guess them), then every tensor, straight from this GPU's memory to the other's."""
+    """Rank 0 side of the weight copy: the shapes and dtypes first (the checkpoint is mixed precision, so the receivers
+    cannot guess them), then every tensor, straight from this GPU's memory to every other rank's (a broadcast)."""
     import torch
     import torch.distributed as dist
 
@@ -811,7 +1155,7 @@ def send_transformer(model, device) -> None:
 
 
 def receive_transformer(model_dir: Path, denoiser_name: str, device):
-    """Rank 1 side of the weight copy: builds the transformer without weights (on the meta device), gives every
+    """Receiving side of the weight copy (ranks 1 and up): builds the transformer without weights (on the meta device), gives every
     parameter and buffer real, empty storage on `device` with the shape and dtype rank 0 announces, and fills it from
     rank 0, in rank 0's order. Nothing is read from disk."""
     import torch
@@ -848,18 +1192,19 @@ def receive_transformer(model_dir: Path, denoiser_name: str, device):
     return model.eval()
 
 
-def enable_parallel_denoiser(model) -> None:
-    """Turns on two-way Ulysses context parallelism on `model` (the transformer, with its attention backend already
-    set: the backend has to support it, and FlashAttention-3 and diffusers' default do). Both ranks must call this at
-    the same point: it creates process groups together.
+def enable_parallel_denoiser(model, world_size: int) -> None:
+    """Turns on `world_size`-way Ulysses context parallelism on `model` (the transformer, with its attention backend
+    already set: the backend has to support it, and FlashAttention-3 and diffusers' default do). Every rank must call
+    this at the same point: it creates process groups together.
 
-    `ulysses_anything` because the packed sequence has whatever length the request makes it (it need not divide by two).
+    `ulysses_anything` because the packed sequence has whatever length the request makes it (it need not divide by the
+    number of GPUs).
     """
     from diffusers import ContextParallelConfig
 
-    model.enable_parallelism(config=ContextParallelConfig(ulysses_degree=WORLD_SIZE, ulysses_anything=True))
+    model.enable_parallelism(config=ContextParallelConfig(ulysses_degree=world_size, ulysses_anything=True))
     # enable_parallelism puts the setting on every attention layer, but the two-layer text refiner runs on the text
-    # *before* the sequence is split: both ranks hold all of it, so it must not be exchanged as if each held half.
+    # *before* the sequence is split: every rank holds all of it, so it must not be exchanged as if each held a part.
     for module in model.token_refiner.modules():
         processor = getattr(module, "processor", None)
         if processor is not None and hasattr(processor, "_parallel_config"):
@@ -872,65 +1217,83 @@ def denoised_names(denoise_blocks, decode_blocks) -> list[str]:
     return [param.name for param in decode_blocks.inputs if param.name in produced]
 
 
-def gather_peak_memory() -> list[float]:
-    """Each rank's peak GPU memory in GiB, as seen by both (also the last operation the two ranks do together)."""
+def worker_error_file(work_dir: Path, rank: int) -> Path:
+    return work_dir / WORKER_ERROR_NAME.format(rank=rank)
+
+
+def gather_peak_memory(world_size: int) -> list[float]:
+    """Each rank's peak GPU memory in GiB, as seen by all (also the last operation the ranks do together)."""
     import torch
     import torch.distributed as dist
 
-    peaks: list = [None] * WORLD_SIZE
+    peaks: list = [None] * world_size
     dist.all_gather_object(peaks, torch.cuda.max_memory_allocated() / 2**30)
     return peaks
 
 
-def watch_worker(worker: subprocess.Popen, error_file: Path, finished: threading.Event, others: list) -> None:
-    """If the denoise worker dies while this process waits for it inside a GPU operation, say why and stop at once
-    (killing `others` first) instead of waiting for the operation to time out. Stops watching when `finished` is set."""
+def watch_workers(
+    workers: list[tuple[subprocess.Popen, Path]], finished: threading.Event, others: list, on_failure=None
+) -> None:
+    """If a denoise worker (a (process, error file) pair) dies while this process waits for the others inside a GPU
+    operation, say why and stop at once (killing `others` and the remaining workers first) instead of waiting for the
+    operation to time out. `on_failure(reason)`, if given, is called first (to record the failure). Stops watching
+    when `finished` is set, or when every worker has exited cleanly."""
 
     def watch() -> None:
         while not finished.wait(2):
-            code = worker.poll()
-            if code is None:
-                continue
-            if code != 0:
+            for worker, error_file in workers:
+                code = worker.poll()
+                if code is None or code == 0:
+                    continue
                 reason = error_file.read_text() if error_file.is_file() else f"exit code {code}"
-                for process in others:
+                if on_failure is not None:
+                    on_failure(reason)
+                for process in [*others, *(other for other, _ in workers)]:
                     if process.poll() is None:
                         process.kill()
-                print(f"ERROR: the second denoising process failed: {reason}", file=sys.stderr, flush=True)
+                print(f"ERROR: a denoising process failed: {reason}", file=sys.stderr, flush=True)
                 os._exit(1)
-            return
+            if all(worker.poll() == 0 for worker, _ in workers):
+                return
 
-    threading.Thread(target=watch, name="watch-denoise-worker", daemon=True).start()
+    threading.Thread(target=watch, name="watch-denoise-workers", daemon=True).start()
 
 
-def run_pipeline_ulysses(args: argparse.Namespace) -> int:
-    """--parallelism ulysses: rank 0. Loads the generation half as in split mode, encodes the references, copies the
-    transformer to the worker's GPU, and then both denoise together."""
-    _, conditioning_gpu, handoff, error_file = prepare_job(args)
-    worker_error_file = args.work_dir / WORKER_ERROR_NAME
+def run_pipeline_ulysses(args: argparse.Namespace, metrics: Metrics) -> int:
+    """--parallelism ulysses: rank 0. Loads the generation half as in split mode, encodes the references, broadcasts the
+    transformer to the other ranks' GPUs, and then all of them denoise together."""
+    world_size = args.gpus
+    _, encoder_gpus, handoff, error_file = prepare_job(args)
+    worker_files = [worker_error_file(args.work_dir, rank) for rank in range(1, world_size)]
     encoded_file = args.work_dir / ENCODED_NAME
-    worker_error_file.unlink(missing_ok=True)
+    for leftover in worker_files:
+        leftover.unlink(missing_ok=True)
     encoded_file.unlink(missing_ok=True)
-    # NVLink-SHARP buffers can take several GiB per communicator on NVSwitch nodes, and two GPUs gain nothing from
-    # them; every GiB counts when each GPU holds the whole transformer. (Inherited by the worker.)
+    # NVLink-SHARP buffers can take several GiB per communicator on NVSwitch nodes, and the GPUs of one node gain
+    # nothing from them; every GiB counts when each GPU holds the whole transformer. (Inherited by the workers.)
     os.environ.setdefault("NCCL_NVLS_ENABLE", "0")
-    log("run", "parallelism: ulysses (both GPUs compute every denoising step, each on half of the token sequence)")
+    log("run", f"parallelism: ulysses (all {world_size} GPUs compute every denoising step, each on 1/{world_size} of the token sequence)")
 
     port = free_local_port()
-    child = spawn_condition_child(handoff, conditioning_gpu)
-    # Started now, so its imports are done long before it is needed. It sees both GPUs but touches neither until rank 0
-    # opens the rendezvous store, which is after the encoder (the conditioning GPU's current user) has exited.
-    worker = subprocess.Popen(
-        [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:], "--stage", "denoise-worker"],
-        env={**os.environ, DIST_PORT_ENV: str(port)},
-    )
+    child = spawn_condition_child(handoff, encoder_gpus)
+    # Started now, so their imports are done long before they are needed. They see all the job's GPUs but touch none
+    # until rank 0 opens the rendezvous store, which is after the encoder (the current user of GPUs g1 and g2) has
+    # exited. Rank r takes the job's GPU number r (cuda:r).
+    workers = [
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:], "--stage", "denoise-worker", "--rank", str(rank)],
+            env={**os.environ, DIST_PORT_ENV: str(port)},
+        )
+        for rank in range(1, world_size)
+    ]
     worker_finished = threading.Event()
-    watch_worker(worker, worker_error_file, worker_finished, [child])
+    watch_workers(list(zip(workers, worker_files)), worker_finished, [child], on_failure=lambda reason: metrics.fail(reason, "worker"))
     try:
         import torch
         import torch.distributed as dist
         from diffusers.utils.export_utils import encode_video
 
+        record_run_setup(metrics, args)
         allow_any_length()
         _, rest_blocks = split_workflow(args.model_dir, args.workflow)
         vae_blocks, denoise_blocks, decode_blocks = split_rest_blocks(rest_blocks)
@@ -938,11 +1301,14 @@ def run_pipeline_ulysses(args: argparse.Namespace) -> int:
         log("run", "loading the transformer and VAEs (while the encoder loads in the other process)")
         pipeline, seconds = make_pipeline(rest_blocks, args.model_dir, "cuda:0")
         log("run", f"set up in {seconds:.0f}s")
+        metrics.timing("setup", seconds)
         apply_attention_backend(pipeline, args.attention_backend)
-        load_onto_generation_gpu(pipeline)
+        with metrics.stage("load_gpu"):
+            load_onto_generation_gpu(pipeline)
         denoiser = getattr(pipeline, denoiser_name)
 
-        wait_for_conditioning(child, error_file)
+        with metrics.stage("wait_encoder"):
+            wait_for_conditioning(child, error_file)
         conditioning = torch.load(handoff, weights_only=False)  # written by the child just above, in our own job folder
         kwargs = build_denoise_kwargs(args, conditioning, torch.device("cuda:0"))
 
@@ -951,8 +1317,9 @@ def run_pipeline_ulysses(args: argparse.Namespace) -> int:
         encoded: dict = {}
         if vae_blocks is not None:
             started = time.time()
-            vae_pipeline = sub_pipeline(vae_blocks, pipeline, args.model_dir)
-            encoded = vae_pipeline(output=output_names(vae_blocks), **select_inputs(vae_blocks, kwargs))
+            with metrics.stage("reference_encode"):
+                vae_pipeline = sub_pipeline(vae_blocks, pipeline, args.model_dir)
+                encoded = vae_pipeline(output=output_names(vae_blocks), **select_inputs(vae_blocks, kwargs))
             log("run", f"references encoded in {time.time() - started:.0f}s")
         kwargs.update(encoded)
         torch.save(pack_values(encoded), encoded_file)
@@ -966,50 +1333,67 @@ def run_pipeline_ulysses(args: argparse.Namespace) -> int:
         torch.cuda.empty_cache()
         log("run", f"VAEs moved off the GPU for denoising ({torch.cuda.memory_allocated() / 2**30:.1f} GiB in use)")
 
-        # Open the group; from here on the worker (waiting on the store since the start) owns the second GPU.
-        store = init_distributed(0, port)
-        log("run", "GPU link to the second process is up")
+        # Open the group; from here on the workers (waiting on the store since the start) own the other GPUs.
+        with metrics.stage("group_init"):
+            store = init_distributed(0, port, world_size)
+        log("run", f"GPU link to the {world_size - 1} other process(es) is up")
         started = time.time()
-        send_transformer(denoiser, torch.device("cuda:0"))
-        log("run", f"transformer copied to the second GPU in {time.time() - started:.0f}s")
-        enable_parallel_denoiser(denoiser)
+        with metrics.stage("weights_copy"):
+            send_transformer(denoiser, torch.device("cuda:0"))
+        log("run", f"transformer copied to the other {world_size - 1} GPU(s) in {time.time() - started:.0f}s")
+        enable_parallel_denoiser(denoiser, world_size)
+        record_sequence_shape(denoiser, metrics)
 
         denoise_pipeline = sub_pipeline(denoise_blocks, pipeline, args.model_dir)
+        # What this GPU needed before denoising: the whole transformer and the VAEs, plus the reference encoding.
+        metrics.peak("before_denoise", torch.cuda.max_memory_allocated() / 2**30)
         torch.cuda.reset_peak_memory_stats()
         started = time.time()
-        denoised = denoise_pipeline(
-            output=denoised_names(denoise_blocks, decode_blocks), **select_inputs(denoise_blocks, kwargs)
-        )
+        with metrics.stage("denoise"):
+            denoised = denoise_pipeline(
+                output=denoised_names(denoise_blocks, decode_blocks), **select_inputs(denoise_blocks, kwargs)
+            )
         denoise_seconds = time.time() - started
-        peaks = gather_peak_memory()
+        peaks = gather_peak_memory(world_size)
         worker_finished.set()
         dist.destroy_process_group()
         log("run", f"denoised in {denoise_seconds:.0f}s")
-        log("run", f"peak GPU memory during denoising: generation GPU {peaks[0]:.1f} GiB, second GPU {peaks[1]:.1f} GiB")
+        log(
+            "run",
+            f"peak GPU memory during denoising: generation GPU {peaks[0]:.1f} GiB, other GPUs "
+            f"{', '.join(f'{peak:.1f}' for peak in peaks[1:])} GiB",
+        )
+        metrics.peak("denoise", peaks)
+        metrics.update(denoise_seconds_per_step=round(denoise_seconds / (args.steps or DEFAULT_STEPS), 2))
         del store
 
         # The decode runs on this GPU alone, and needs the room the transformer is holding.
-        started = time.time()
-        denoiser.to("cpu")
-        torch.cuda.empty_cache()
-        log("run", f"transformer moved off the GPU for the decode in {time.time() - started:.0f}s")
+        with metrics.stage("transformer_to_host"):
+            denoiser.to("cpu")
+            torch.cuda.empty_cache()
+        log("run", f"transformer moved off the GPU for the decode in {metrics.data['timings_s']['transformer_to_host']:.0f}s")
 
         started = time.time()
-        decode_pipeline = sub_pipeline(decode_blocks, pipeline, args.model_dir)
-        results = decode_pipeline(output=OUTPUTS, **select_inputs(decode_blocks, denoised))
+        torch.cuda.reset_peak_memory_stats()
+        with metrics.stage("decode"):
+            decode_pipeline = sub_pipeline(decode_blocks, pipeline, args.model_dir)
+            results = decode_pipeline(output=OUTPUTS, **select_inputs(decode_blocks, denoised))
         frames = results["videos"][0]
         log("run", f"decoded {len(frames)} frames of {frames[0].size[0]}x{frames[0].size[1]} in {time.time() - started:.0f}s")
+        metrics.peak("decode", torch.cuda.max_memory_allocated() / 2**30)
+        metrics.update(output_frames=len(frames))
 
-        encode_video(
-            frames,
-            fps=FPS,
-            output_path=str(args.output_path),
-            audio=results["audio"][0],
-            audio_sample_rate=results["sampling_rate"],
-        )
+        with metrics.stage("mux"):
+            encode_video(
+                frames,
+                fps=FPS,
+                output_path=str(args.output_path),
+                audio=results["audio"][0],
+                audio_sample_rate=results["sampling_rate"],
+            )
     finally:
         worker_finished.set()
-        for process in (child, worker):
+        for process in (child, *workers):
             if process.poll() is None:
                 process.kill()
                 process.wait()
@@ -1020,18 +1404,20 @@ def run_pipeline_ulysses(args: argparse.Namespace) -> int:
                 handoff.with_name(handoff.name + ".partial"),
                 error_file,
                 encoded_file,
-                worker_error_file,
+                *worker_files,
             ],
         )
 
     return finish_job(args)
 
 
-def run_denoise_worker_stage(args: argparse.Namespace) -> int:
-    """--parallelism ulysses: rank 1, started by `run_pipeline_ulysses` with this same argv. Runs the same denoising
-    loop on the conditioning GPU, on the other half of the token sequence. Its weights come from rank 0 (nothing is
-    read from disk) and its result is discarded: both ranks end up with the full denoised latents, rank 0 keeps them."""
-    error_file = args.work_dir / WORKER_ERROR_NAME
+def run_denoise_worker_stage(args: argparse.Namespace, metrics: Metrics) -> int:
+    """--parallelism ulysses: rank --rank (1 .. gpus-1), started by `run_pipeline_ulysses` with this same argv. Runs the
+    same denoising loop on the job's GPU number <rank>, on its share of the token sequence. Its weights come from rank 0
+    (nothing is read from disk) and its result is discarded: every rank ends up with the full denoised latents, rank 0
+    keeps them."""
+    error_file = worker_error_file(args.work_dir, args.rank)
+    rank, world_size = args.rank, args.gpus
     try:
         os.environ["TQDM_DISABLE"] = "1"  # rank 0's progress bar is the one in the log; this must precede any tqdm use
         import torch
@@ -1046,16 +1432,18 @@ def run_denoise_worker_stage(args: argparse.Namespace) -> int:
         # Only the two schedulers: the transformer is not read from disk here, rank 0 sends it.
         scheduler_names = [spec.name for spec in denoise_blocks.expected_components if spec.name != denoiser_name]
         pipeline.load_components(names=scheduler_names, dtype=torch.bfloat16)
-        log("denoise-worker", "ready, waiting for the generation process (the second GPU is the encoder's until then)")
+        log(f"denoise-worker {rank}", "ready, waiting for the generation process (GPUs 1 and 2 are the encoder's until then)")
 
-        store = init_distributed(1, port)
-        device = torch.device("cuda:1")
+        with metrics.stage("wait_for_rank0"):  # until the weights are loaded and the encoder has exited
+            store = init_distributed(rank, port, world_size)
+        device = torch.device(f"cuda:{rank}")
         started = time.time()
-        denoiser = receive_transformer(args.model_dir, denoiser_name, device)
-        log("denoise-worker", f"transformer received in {time.time() - started:.0f}s")
+        with metrics.stage("weights_receive"):
+            denoiser = receive_transformer(args.model_dir, denoiser_name, device)
+        log(f"denoise-worker {rank}", f"transformer received in {time.time() - started:.0f}s")
         if args.attention_backend:
             denoiser.set_attention_backend(args.attention_backend)
-        enable_parallel_denoiser(denoiser)
+        enable_parallel_denoiser(denoiser, world_size)
 
         # The same inputs rank 0 denoises: the conditioning handoff (still in the job folder) and the encoded
         # references rank 0 wrote before it opened the rendezvous store.
@@ -1066,15 +1454,19 @@ def run_denoise_worker_stage(args: argparse.Namespace) -> int:
 
         torch.cuda.reset_peak_memory_stats()
         started = time.time()
-        pipeline(output=denoised_names(denoise_blocks, decode_blocks), **select_inputs(denoise_blocks, kwargs))
-        log("denoise-worker", f"denoised in {time.time() - started:.0f}s")
-        gather_peak_memory()
-        log("denoise-worker", f"peak GPU memory during denoising: {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB")
+        with metrics.stage("denoise"):
+            pipeline(output=denoised_names(denoise_blocks, decode_blocks), **select_inputs(denoise_blocks, kwargs))
+        log(f"denoise-worker {rank}", f"denoised in {time.time() - started:.0f}s")
+        gather_peak_memory(world_size)
+        peak = torch.cuda.max_memory_allocated() / 2**30
+        log(f"denoise-worker {rank}", f"peak GPU memory during denoising: {peak:.1f} GiB")
+        metrics.peak("denoise", peak)
         dist.destroy_process_group()
         del store
         return 0
     except Exception as error:  # reported to the generation process through a file (and by its watchdog)
         traceback.print_exc()
+        metrics.fail(error)
         try:
             error_file.write_text(f"{type(error).__name__}: {error}")
         except OSError:
@@ -1083,56 +1475,30 @@ def run_denoise_worker_stage(args: argparse.Namespace) -> int:
         return 1
 
 
-def audio_file_seconds(path: Path) -> float:
-    """Length of an audio file, read from its header (PyAV, no torch, so this is safe before the GPUs are chosen)."""
-    import av
-
-    with av.open(str(path)) as container:
-        stream = container.streams.audio[0]
-        if stream.duration is not None and stream.time_base is not None:
-            return float(stream.duration * stream.time_base)
-        if container.duration is not None:
-            return container.duration / av.time_base
-    raise ValueError(f"cannot read the length of {path}")
-
-
-def choose_parallelism(args: argparse.Namespace) -> str:
-    """--parallelism auto: ulysses when the (frame-grid) length is at most ULYSSES_MAX_SECONDS, else split.
-    The length is compared on the 17 * n + 5 frame grid, because that is what is generated: a 10 s request
-    rounds up to 243 frames, and so does a 10.1 s one, so both need the same memory. When the length
-    cannot be worked out, split is chosen: it is the one with room to spare."""
-    if args.match_audio_duration:
-        try:
-            frames = snap_num_frames(round(audio_file_seconds(args.reference_audio[0]) * FPS))
-        except Exception as error:
-            log("run", f"parallelism auto: could not read the first reference audio's length ({error}); using split")
-            return "split"
-    else:
-        frames = snap_num_frames(args.num_frames or DEFAULT_FRAMES)
-    limit = snap_num_frames(round(ULYSSES_MAX_SECONDS * FPS))
-    mode = "ulysses" if frames <= limit else "split"
-    log("run", f"parallelism auto: {frames} frames ({frames / FPS:.1f} s), limit for ulysses {limit} frames ({ULYSSES_MAX_SECONDS} s) -> {mode}")
-    return mode
-
-
-def run_pipeline(args: argparse.Namespace) -> int:
-    if args.parallelism == "auto":
-        args.parallelism = choose_parallelism(args)
-    return run_pipeline_split(args) if args.parallelism == "split" else run_pipeline_ulysses(args)
+def run_pipeline(args: argparse.Namespace, metrics: Metrics) -> int:
+    return run_pipeline_split(args, metrics) if args.parallelism == "split" else run_pipeline_ulysses(args, metrics)
 
 
 def main() -> int:
     args = parse_args()
+    role = {"run": "run", "condition": "condition", "denoise-worker": f"worker{args.rank}"}[args.stage]
+    metrics = Metrics(args.metrics_dir, role)
+    code = 1
     try:
         if args.stage == "condition":
-            return run_condition_stage(args)
-        if args.stage == "denoise-worker":
-            return run_denoise_worker_stage(args)
-        return run_pipeline(args)
+            code = run_condition_stage(args, metrics)
+        elif args.stage == "denoise-worker":
+            code = run_denoise_worker_stage(args, metrics)
+        else:
+            code = run_pipeline(args, metrics)
+        return code
     except Exception as error:
         traceback.print_exc()
+        metrics.fail(error)
         print(f"ERROR: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
         return 1
+    finally:
+        metrics.finish(code == 0)
 
 
 if __name__ == "__main__":

@@ -112,7 +112,8 @@ export default function H3ShapeFields({ model, shape, onChange, defaultCanvasHin
       )}
       <p className="text-xs text-muted">
         Fixed 24 fps. Lengths are rounded up to the next 17n+5 frames. The model is documented for {H3_DOCUMENTED_RANGE} (124-345
-        frames); anything shorter or longer is experimental and may look wrong, fail, or run out of GPU memory.
+        frames); anything shorter or longer is experimental and may look wrong or fail. A request too big for the GPUs
+        (a long video with large references, say) is refused when you submit, with the reason.
       </p>
     </div>
   );

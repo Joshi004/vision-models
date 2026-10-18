@@ -38,14 +38,32 @@ function overallFraction(progress) {
   return total > 0 ? Math.min(1, done / total) : null;
 }
 
+// How long a running job is expected to take, and where that number came
+// from: the estimate the server made from this request's own size
+// (`estimated_run_seconds`, only some backends -- H3 today) if there is one,
+// otherwise the median of earlier runs of the same recipe.
+function expectedRun(job) {
+  if (job.estimated_run_seconds != null) return { seconds: job.estimated_run_seconds, label: 'estimated' };
+  if (job.typical_run_seconds != null) return { seconds: job.typical_run_seconds, label: 'typical' };
+  return null;
+}
+
 // One-line summary shown directly in the (always-visible) job row --
 // elapsed time, current stage/clip if there is one, and a rough
 // time-left estimate once one exists (the job's own live ETA if
-// available, otherwise typical-minus-elapsed).
+// available, otherwise expected-minus-elapsed).
 export function JobTimingSummary({ job, now }) {
   if (job.status === 'queued') {
     const elapsed = secondsSince(job.created_at, now);
-    return <span className="text-xs text-muted">Queued {formatDuration(elapsed)}, waiting for a GPU</span>;
+    const waitingFor = job.gpus != null ? `${job.gpus} GPUs` : 'a GPU';
+    const estimate =
+      job.estimated_run_seconds != null ? ` \u2014 est. ~${formatDuration(job.estimated_run_seconds)} once started` : '';
+    return (
+      <span className="text-xs text-muted">
+        Queued {formatDuration(elapsed)}, waiting for {waitingFor}
+        {estimate}
+      </span>
+    );
   }
 
   if (job.status === 'running') {
@@ -56,12 +74,13 @@ export function JobTimingSummary({ job, now }) {
     let remainingText = null;
     if (job.progress?.eta_seconds != null) {
       remainingText = `about ${formatDuration(job.progress.eta_seconds)} left`;
-    } else if (job.typical_run_seconds != null && elapsed != null) {
-      const remaining = job.typical_run_seconds - elapsed;
+    } else if (expectedRun(job) != null && elapsed != null) {
+      const expected = expectedRun(job);
+      const remaining = expected.seconds - elapsed;
       remainingText =
         remaining > 0
           ? `about ${formatDuration(remaining)} left`
-          : `running longer than usual (typical ~${formatDuration(job.typical_run_seconds)})`;
+          : `running longer than ${expected.label} (${expected.label} ~${formatDuration(expected.seconds)})`;
     }
 
     return (
@@ -131,6 +150,12 @@ export function JobTimingDetail({ job, now }) {
           />
           <span>{clipStep}</span>
         </div>
+      )}
+
+      {job.gpus != null && <p>GPUs: {job.gpus}</p>}
+
+      {job.estimated_run_seconds != null && (
+        <p>Estimated run time for this request: ~{formatDuration(job.estimated_run_seconds)} (from its size, once started)</p>
       )}
 
       {job.typical_run_seconds != null && (

@@ -6,9 +6,12 @@ seconds is plenty**; every job takes minutes at an absolute minimum, so polling 
 for no benefit.
 
 **Why "queued" can last a while:** every request dynamically submits a new job to this cluster's
-job scheduler. No backend here keeps a resident, "warm" model in GPU memory across requests -- each
-job cold-starts by loading model weights from storage before it does any actual work, then releases
-its allocation afterward. On top of that cold start, a job can also sit genuinely queued for a while
+job scheduler. Except for the Qwen3.8 text model (below), no backend here keeps a resident, "warm"
+model in GPU memory across requests -- each job cold-starts by loading model weights from storage
+before it does any actual work, then releases its allocation afterward. The Qwen3.8 text model keeps
+one shared server running while it is in use and stops it after a period without requests: its
+requests are answered in seconds when the server is up, and a request that arrives while it is
+stopped stays `queued` for the several minutes the server takes to start. On top of that cold start, a job can also sit genuinely queued for a while
 if the cluster is busy; that queue wait has no fixed upper bound. Budget at least several minutes
 per request before any backend-specific timing on top of that -- see each backend's own section
 below for real measured numbers.
@@ -25,6 +28,15 @@ and automatically restarted) by higher-priority work, which surfaces as the job 
 
 **If a job's `status` becomes `"failed"` due to pre-emption** (the `error` field will say so), the
 correct response is to resubmit the identical request unchanged, not to treat it as a bad input.
+
+**GPUs and an estimate for this request:** a backend that sizes each request before it queues the job
+(MiniMax H3 today) also reports two numbers: `gpus`, how many GPUs the job was given, and
+`estimated_run_seconds`, about how long it will run once it starts (the queue wait is not included). They are
+in the response that submits the job and in `GET /v1/jobs/{job_id}` and `GET /v1/jobs`. Prefer
+`estimated_run_seconds` over `typical_run_seconds` when it is present: it accounts for this request's own
+size, where the typical figure is the median of whatever ran before. Both are rough "about" figures. Every
+other backend reports `gpus` and `estimated_run_seconds` as `null`. Such a backend can also refuse a request
+that is valid but too big for its GPUs, with HTTP 422 and a sentence saying why, before anything is queued.
 
 **Live progress:** some backends report fine-grained progress (current stage, step, a rough ETA) in
 the `progress` field while `status` is `"running"`; every other backend simply reports

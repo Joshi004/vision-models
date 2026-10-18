@@ -21,6 +21,7 @@ import TranscribeForm from './forms/TranscribeForm.jsx';
 import BreezeTtsForm from './forms/BreezeTtsForm.jsx';
 import LipSyncForm from './forms/LipSyncForm.jsx';
 import { QwenImageGenerateForm, QwenImageEditForm } from './forms/QwenImageForm.jsx';
+import Qwen38GenerateForm from './forms/Qwen38GenerateForm.jsx';
 import { getHealth, getOpenApi } from './api.js';
 import { extractSchemas, SchemaContext } from './schema.js';
 import { usePersistedState } from './storage.js';
@@ -39,6 +40,7 @@ const GROUPS = [
   { id: 'parakeet', label: 'Transcription' },
   { id: 'breeze', label: 'Text to Speech' },
   { id: 'qwen-image', label: 'Image Generation' },
+  { id: 'qwen38', label: 'Text model' },
 ];
 
 // One entry per generation recipe this API actually has today. `pipeline`
@@ -145,7 +147,7 @@ const RECIPES = [
   {
     id: 'h3-generate',
     label: 'Text / frame to video',
-    description: 'Generate a video with sound on MiniMax H3 from a prompt, optionally from a first and/or last frame. Two GPUs per job.',
+    description: 'Generate a video with sound on MiniMax H3 from a prompt, optionally from a first and/or last frame. 4 or 8 GPUs per job, chosen from the request.',
     group: 'h3',
     icon: FilmIcon,
     Component: H3GenerateForm,
@@ -154,7 +156,7 @@ const RECIPES = [
   {
     id: 'h3-audio-to-video',
     label: 'Audio to video',
-    description: 'Generate a video with sound on MiniMax H3 from an audio reference plus image and/or video references. Two GPUs per job.',
+    description: 'Generate a video with sound on MiniMax H3 from an audio reference plus image and/or video references. 4 or 8 GPUs per job, chosen from the request.',
     group: 'h3',
     icon: WaveIcon,
     Component: H3AudioToVideoForm,
@@ -231,6 +233,15 @@ const RECIPES = [
     icon: ImageIcon,
     Component: QwenImageEditForm,
     pipeline: 'qwen-image21:edit',
+  },
+  {
+    id: 'qwen38-generate',
+    label: 'Text and JSON',
+    description: 'Ask Qwen3.8-27B for text, or for JSON that matches a schema you give. Text only.',
+    group: 'qwen38',
+    icon: TranscriptIcon,
+    Component: Qwen38GenerateForm,
+    pipeline: 'qwen38:generate',
   },
 ];
 

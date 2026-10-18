@@ -48,7 +48,7 @@ RUN_PIPELINE_JOB_SCRIPT = common_config.MODEL_API_DIR / "common" / "run_pipeline
 # 17 * n + 5 frames, and the runner switches off diffusers' own 5-15 s check
 # (run_h3.py::allow_any_length). Outside 5-15 s is EXPERIMENTAL: quality is
 # unknown and long clips may run out of GPU memory. The only remaining ceiling
-# is MAX_DURATION_SECONDS, a safety guard so one request cannot hold two GPUs
+# is MAX_DURATION_SECONDS, a safety guard so one request cannot hold its GPUs
 # for hours; raise it with H3_MAX_SECONDS.
 # ---------------------------------------------------------------------------
 FPS = 24
@@ -62,8 +62,9 @@ PORTRAIT_HEIGHT, PORTRAIT_WIDTH = 1344, 768
 SIZE_MULTIPLE = 32
 # Explicit height/width bounds: the area the model was trained at is 768 x 1344;
 # smaller canvases are the documented speed lever, larger ones are untested here
-# and may not fit in the memory left for activations on the job's two GPUs (see
-# the Slurm allocation comment below).
+# and may not fit in the memory left for activations on the job's GPUs (see the
+# Slurm allocation comment below). The sizer (services/h3/sizing.py) rejects a request
+# whose sequence does not fit.
 MIN_SIDE = 256
 MAX_SIDE = 1536
 
@@ -77,61 +78,100 @@ MAX_REFERENCE_AUDIOS = 3
 MAX_REFERENCES = 12
 
 # ---------------------------------------------------------------------------
-# Slurm allocation shape. TWO GPUs on one node per job: while the prompt is
-# encoded, the Qwen3-VL-32B encoder (62 GiB of bf16 weights) is on one and the
-# 33B transformer (61.7 GiB) on the other. When the encoder is done, its
-# now-free GPU is used for denoising in one of two ways (PARALLELISM below):
-#   * "ulysses" (default): the transformer is copied to the freed GPU, so EACH
-#     GPU holds all 61.7 GiB, and both compute every denoising step, each on
-#     half of the token sequence. Faster per step; about 17 GiB per GPU is left
-#     for activations (each GPU sees half of the tokens).
-#   * "split": blocks 25-49 of the transformer move to the freed GPU, so each
-#     holds about 31 GiB of weights and ~45 GiB per GPU is left for
-#     activations (a 345-frame 1344x768 clip ran out of memory on one GPU),
-#     but the GPUs take turns.
-# See models/h3/runner/run_h3.py. Partition is deliberately not
-# configured here: every request may pick its own, falling back to
-# common.config.FALLBACK_PARTITION -- see common/slurm.py::resolve_partition.
+# Slurm allocation shape. Every job holds N GPUs on one node (N = 4 or 8, chosen
+# per request by services/h3/sizing.py) and always runs "ulysses":
+#   * While the prompt and references are encoded, the Qwen3-VL-32B encoder
+#     (62 GiB of bf16 weights) is split across two GPUs (layers 0-31 and 32-63),
+#     and the 33B transformer (61.7 GiB) sits on the first GPU.
+#   * Then ALL N GPUs denoise together: the transformer is copied to every GPU
+#     (61.7 GiB each) and each GPU computes every step on 1/N of the token
+#     sequence (diffusers' "Ulysses" context parallelism), so the activation
+#     memory per GPU shrinks as N grows. About 15 GiB per GPU is left for it.
+# "split" (the transformer's blocks divided over two GPUs) stays in the runner as an
+# operator fallback only. See models/h3/runner/run_h3.py.
+# Partition is deliberately not configured here: every request may pick its own,
+# falling back to common.config.FALLBACK_PARTITION -- see common/slurm.py::resolve_partition.
 #
-# NONE of the numbers below has been measured on this cluster yet; they are
-# estimates, to be replaced once real jobs have run (see docs/models/h3/README.md).
-#   * Host RAM: both halves load into RAM before moving onto their GPU, about
-#     144 GB at the same time (62 GiB encoder + 72 GiB transformer and VAEs), so
-#     2 x 112G leaves a wide margin.
-#   * CPUs: two processes read and convert weights in parallel.
-#   * Time: about 5 min of loading (the two halves in parallel), plus 50
-#     denoising steps. diffusers' docs: 960x544 runs ~2.3x faster per step than
-#     the trained 1344x768, and an independent benchmark on one H100 measured
-#     ~3 s/step at 960x544 for a 5 s clip. A 15 s clip has ~3x the tokens.
+# Host RAM: the encoder's and the transformer's weights are read into RAM before they
+# move onto their GPUs, about 144 GB at the same time, so the default of 256G for the
+# whole job leaves a margin (it is per job now, not per GPU, because a job's size varies).
 # ---------------------------------------------------------------------------
-GPUS_PER_JOB = 2
-MEM_PER_GPU = os.environ.get("H3_MEM_PER_GPU", "112G")
-CPUS = os.environ.get("H3_CPUS", "16")
+MEM = os.environ.get("H3_MEM", "256G")
+CPUS_PER_GPU = int(os.environ.get("H3_CPUS_PER_GPU", "8"))
+# The longest a job may be given, and so the longest estimate a request may have. Slurm's HH:MM:SS.
 JOB_TIME_LIMIT = os.environ.get("H3_API_TIME", "01:30:00")
 
 # Optional diffusers attention backend for the transformer, e.g. "_flash_3_hub"
-# (FlashAttention-3 on Hopper, roughly 3x faster per diffusers' docs). Unset =
-# diffusers' default. Operator-selectable, not per-request. The hub kernels need
-# the `kernels` package and a pre-filled Hugging Face cache, because jobs run
-# offline -- see docs/models/h3/README.md before turning this on.
+# (FlashAttention-3 on Hopper, roughly 2x faster than the default per measurements
+# on this cluster). Unset = diffusers' default. Operator-selectable, not per-request.
+# The hub kernels need the `kernels` package and a pre-filled Hugging Face cache,
+# because jobs run offline -- see docs/models/h3/README.md before turning this on.
 ATTENTION_BACKEND = os.environ.get("H3_ATTENTION_BACKEND") or None
 
-# How the job's two GPUs share the denoising (see the Slurm allocation comment
-# above): "ulysses" (both compute every step, each on half of the token
-# sequence, each holding the whole transformer) or "split" (the transformer's
-# blocks are divided between them and run one after another: slower, but more
-# memory left for activations). The default, "auto", picks per request in the
-# runner: ulysses for a video of up to 10 s, split for a longer one (see
-# run_h3.py::choose_parallelism). Setting "ulysses" or "split" forces that mode
-# for every request. Operator-selectable, not per-request, and read when the
-# gateway starts.
-PARALLELISM_MODES = ("auto", "ulysses", "split")
-PARALLELISM = os.environ.get("H3_PARALLELISM") or "auto"
-if PARALLELISM not in PARALLELISM_MODES:
-    raise RuntimeError(f"H3_PARALLELISM must be one of {', '.join(PARALLELISM_MODES)}, got {PARALLELISM!r}.")
+# How the job's GPUs share the denoising (see the Slurm allocation comment above).
+# Always "ulysses" for now (the runner's --parallelism flag); "split" only works
+# with two GPUs, which the sizer never asks for, so it is not offered here.
+PARALLELISM = "ulysses"
+
+# ---------------------------------------------------------------------------
+# Per-request sizing (services/h3/sizing.py). EVERY NUMBER BELOW IS AN INITIAL
+# GUESS from the failed and the successful jobs seen so far, to be refitted from
+# the usage log (DATA_DIR/metrics/h3_jobs.jsonl, see services/h3/usage_log.py).
+# ---------------------------------------------------------------------------
+# GPU counts a job may use, smallest first; the sizer takes the smallest that fits.
+# "4" pins every job to four GPUs. Only 4 and 8 divide the transformer's 56 heads
+# evenly while leaving room for the two encoder GPUs.
+GPU_OPTIONS = tuple(sorted({int(n) for n in os.environ.get("H3_GPU_OPTIONS", "4,8").split(",")}))
+if not GPU_OPTIONS or any(n not in (4, 8) for n in GPU_OPTIONS):
+    raise RuntimeError(f"H3_GPU_OPTIONS must list 4 and/or 8, got {GPU_OPTIONS}.")
+
+# Largest share of the denoising sequence one GPU may hold (rows of the packed
+# sequence: text + references + audio + video). Activations are about 0.18 MiB per
+# row and about 15 GiB are free next to the weights, so ~80000 would just fit; 40000
+# leaves a wide margin until real peaks are known.
+ROWS_PER_GPU = int(os.environ.get("H3_ROWS_PER_GPU", "40000"))
+
+# Largest token count the encoder may be given. It keeps every layer's output, about
+# 0.63 MiB per token (60000 tokens = ~38 GiB, spread over its two GPUs, which each
+# have ~48 GiB left after their half of the weights), plus attention and MLP
+# workspace on top; the margin is deliberate. The failed 2-image request had 13,673.
+MAX_ENCODER_TOKENS = int(os.environ.get("H3_MAX_ENCODER_TOKENS", "60000"))
+
+# Prompt tokens: characters / 3.5 is a deliberately high ratio (structured English
+# prompts are ~4 characters per token). Each reference adds a label and markers.
+PROMPT_CHARS_PER_TOKEN = 3.5
+TOKENS_PER_REFERENCE_LABEL = 16
+
+# Seconds of one job, at 50 steps, for a 73000-row sequence (243 frames at 1344x768,
+# no references), the baseline the denoising time is scaled from.
+LOAD_SECONDS = 330        # reading the weights from shared storage
+COPY_SECONDS = 60         # copying the transformer to the other GPUs
+DECODE_SECONDS = 120      # video + audio VAE decode and mux
+REFERENCE_ENCODE_SECONDS_PER_ROW = 0.0004   # VAE-encoding references, per row they add (a pure placeholder: never measured)
+BASELINE_DENOISE_SECONDS = 862
+BASELINE_ROWS = 73000
+DENOISE_ROWS_EXPONENT = 1.5   # between linear (MLP) and quadratic (attention)
+DEFAULT_STEPS = 50
+# How many times faster than one GPU the denoising runs on N GPUs.
+DENOISE_SPEEDUP = {4: 3.0, 8: 5.0}
+# Without FlashAttention-3 the denoising takes about twice as long.
+NO_FA3_SLOWDOWN = 2.0
+# Slurm's --time is this many times the estimate plus a margin, within [MIN, JOB_TIME_LIMIT].
+TIME_LIMIT_FACTOR = 2.0
+TIME_LIMIT_MARGIN_SECONDS = 10 * 60
+MIN_TIME_LIMIT_SECONDS = 30 * 60
 
 # Fallback "typically takes about..." estimate shown alongside a queued/running
 # job when there is not enough recent history yet for that exact pipeline (see
-# server.py::_typical_run_seconds). A deliberately pessimistic guess (unmeasured)
-# that is replaced automatically by the median of real recent runs once any exist.
+# server.py::_typical_run_seconds). Only used for jobs without their own estimate
+# (older jobs); a job sized by sizing.py carries `estimated_run_seconds` instead.
 TYPICAL_RUN_SECONDS = 20 * 60
+
+
+def job_time_limit_seconds() -> int:
+    """JOB_TIME_LIMIT (Slurm's HH:MM:SS, as every service config here writes it) in seconds."""
+    parts = JOB_TIME_LIMIT.split(":")
+    if len(parts) != 3:
+        raise RuntimeError(f"H3_API_TIME must look like HH:MM:SS, got {JOB_TIME_LIMIT!r}.")
+    hours, minutes, seconds = (int(part) for part in parts)
+    return hours * 3600 + minutes * 60 + seconds

@@ -14,6 +14,10 @@ lifespan handler). For each in-flight job, checked in this order:
      wrapper script never got to record (the node itself failing, admin
      cancellation, or simply still queued/running).
 
+Right after a job is marked succeeded or failed (and before any incognito
+cleanup deletes its folder), a finished H3 job is also appended to its
+numbers-only usage log (services/h3/usage_log.py).
+
 Also runs a periodic sweep that deletes old finished jobs' directories,
 per config.JOB_RETENTION_DAYS.
 """
@@ -31,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from common import config, job_store, retention
+from services.h3 import usage_log as h3_usage_log
 
 logger = logging.getLogger("model-api.poller")
 
@@ -108,6 +113,13 @@ def _lip_sync_requested(row: sqlite3.Row) -> bool:
         return False
 
 
+def _record_usage(row: sqlite3.Row) -> None:
+    """Append the finished job to its backend's numbers-only usage log, for the backends that keep one (H3
+    today). Must run before retention's cleanup, which deletes an incognito job's folder. Never raises."""
+    if row["pipeline"].startswith("h3:"):
+        h3_usage_log.record(row["job_id"])
+
+
 def _check_one(row: sqlite3.Row) -> None:
     job_id = row["job_id"]
     job_dir = Path(row["job_dir"])
@@ -123,6 +135,7 @@ def _check_one(row: sqlite3.Row) -> None:
             if time.monotonic() - first_seen < _OUTPUT_VISIBILITY_GRACE_SECONDS:
                 return
         job_store.mark_succeeded(job_id, expected_output, lip_sync)
+        _record_usage(row)
         retention.on_job_succeeded(job_id)
         _pending_since.pop(job_id, None)
         _pending_since.pop(f"lip_sync:{job_id}", None)
@@ -130,6 +143,7 @@ def _check_one(row: sqlite3.Row) -> None:
 
     if (job_dir / ".failed").exists():
         job_store.mark_failed(job_id, _read_error(job_dir))
+        _record_usage(row)
         retention.on_job_failed(job_id)
         _pending_since.pop(job_id, None)
         return
@@ -160,6 +174,7 @@ def _check_one(row: sqlite3.Row) -> None:
         job_store.mark_failed(job_id, "Slurm job completed but no output file ever appeared.")
     else:
         job_store.mark_failed(job_id, f"Slurm job ended with state: {state}")
+    _record_usage(row)
     retention.on_job_failed(job_id)
 
 

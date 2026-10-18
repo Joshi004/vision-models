@@ -63,6 +63,10 @@ from services.ltx25 import config as ltx25_config
 from services.ltx25.router import router as ltx25_router
 from services.parakeet import config as parakeet_config
 from services.parakeet.router import router as parakeet_router
+from services.qwen38 import config as qwen38_config
+from services.qwen38 import dispatch as qwen38_dispatch
+from services.qwen38 import server_manager as qwen38_server
+from services.qwen38.router import router as qwen38_router
 from services.qwen_image21 import config as qwen_image21_config
 from services.qwen_image21.router import router as qwen_image21_router
 from services.rvc import config as rvc_config
@@ -77,27 +81,32 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("model-api")
 
 _poller_task: asyncio.Task | None = None
+_qwen38_idle_task: asyncio.Task | None = None
 
 
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI):
     config.ensure_directories()
     job_store.init_db()
-    global _poller_task
+    # Qwen3.8 requests are tasks inside this process; whatever a restart interrupted can never finish.
+    qwen38_dispatch.fail_orphaned_jobs()
+    global _poller_task, _qwen38_idle_task
     _poller_task = asyncio.create_task(poller.poll_forever())
+    _qwen38_idle_task = asyncio.create_task(qwen38_server.idle_watch_forever())
     for warning in guide.lint(app):
         logger.warning("docs lint: %s", warning)
     logger.info("model-api ready.")
     yield
-    if _poller_task is not None:
-        _poller_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await _poller_task
+    for task in (_poller_task, _qwen38_idle_task):
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 app = FastAPI(
     title="GPU Cluster Model-Serving API",
-    version="0.14.0",
+    version="0.16.1",
     description=openapi_docs.APP_DESCRIPTION,
     openapi_tags=openapi_docs.TAGS_METADATA,
     lifespan=lifespan,
@@ -115,6 +124,7 @@ app.include_router(breeze_tts_router, prefix="/v1/breeze-tts")
 app.include_router(qwen_image21_router, prefix="/v1/qwen-image21")
 app.include_router(tbdub_router, prefix="/v1/tbdub")
 app.include_router(h3_router, prefix="/v1/h3")
+app.include_router(qwen38_router, prefix="/v1/qwen38")
 
 # Registered backends, for GET /v1/guide (common/guide.py) -- each entry is
 # a small, enumerable set of facts: display name, path prefix, and where
@@ -133,6 +143,7 @@ _BACKENDS: list[guide.BackendInfo] = [
     guide.BackendInfo(id="qwen-image21", name="Qwen-Image-2.1 image generation", prefix="/v1/qwen-image21", guide_file="qwen_image21/GUIDE.md"),
     guide.BackendInfo(id="tbdub", name="TBDub lip sync", prefix="/v1/tbdub", guide_file="tbdub/GUIDE.md"),
     guide.BackendInfo(id="h3", name="MiniMax H3", prefix="/v1/h3", guide_file="h3/GUIDE.md"),
+    guide.BackendInfo(id="qwen38", name="Qwen3.8 text model", prefix="/v1/qwen38", guide_file="qwen38/GUIDE.md"),
 ]
 
 
@@ -247,6 +258,7 @@ _TYPICAL_FALLBACK_SECONDS: dict[str, float] = {
     "qwen-image21": qwen_image21_config.TYPICAL_RUN_SECONDS,
     "tbdub": tbdub_config.TYPICAL_RUN_SECONDS,
     "h3": h3_config.TYPICAL_RUN_SECONDS,
+    "qwen38": qwen38_config.TYPICAL_RUN_SECONDS,
 }
 
 # Same idea, but for live progress readers -- most backends have none
@@ -313,6 +325,8 @@ def _row_to_status(row: sqlite3.Row, typical_cache: dict[str, tuple[float | None
         incognito=bool(row["incognito"]),
         typical_run_seconds=typical_run_seconds,
         typical_basis=typical_basis,
+        gpus=row["gpus"],
+        estimated_run_seconds=row["estimated_run_seconds"],
         progress=progress,
         lip_sync=_lip_sync_result(row),
     )
@@ -414,6 +428,9 @@ def cancel_job(job_id: _JOB_ID_PARAM) -> CancelResponse:
         return CancelResponse(cancelled=False, reason=f"job already {row['status']}")
     if row["slurm_job_id"]:
         cancel_slurm_job(row["slurm_job_id"])
+    if row["pipeline"].startswith("qwen38:"):
+        # No Slurm job of its own: stop the request; the shared model server keeps running.
+        qwen38_dispatch.cancel(job_id)
     job_store.mark_failed(job_id, "Cancelled by client request.")
     retention.on_job_failed(job_id)
     return CancelResponse(cancelled=True)

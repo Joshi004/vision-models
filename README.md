@@ -2,7 +2,7 @@
 
 A model-serving gateway for a GPU cluster (Slurm). One FastAPI app accepts jobs, submits each as a Slurm job, and serves the results. Each model runs in its own isolated Python environment.
 
-Models: LTX-2.3 and LTX-2.5 (video), MiniMax H3 (video with sound, 2 GPUs per job), Wan-Animate v1 (character replace), RVC via Applio (voice conversion), Parakeet (transcription), Breeze TTS 2 (text to speech), Qwen-Image-2.1 (image generation and editing), TBDub (lip sync, also available as `lip_sync` on LTX audio-to-video).
+Models: LTX-2.3 and LTX-2.5 (video), MiniMax H3 (video with sound, 4 or 8 GPUs per job), Wan-Animate v1 (character replace), RVC via Applio (voice conversion), Parakeet (transcription), Breeze TTS 2 (text to speech), Qwen-Image-2.1 (image generation and editing), Qwen3.8-27B-FP8 (text and JSON, one shared warm server), TBDub (lip sync, also available as `lip_sync` on LTX audio-to-video).
 
 ## Layout
 
@@ -30,7 +30,7 @@ git clone --recurse-submodules <repo-url> vision        # or: git submodule upda
 cd vision
 
 # Python environments (one per model, built from the frozen lock files)
-for e in gateway ltx23 ltx25 wan_animate rvc parakeet breeze_tts qwen_image21 tbdub h3; do scripts/build_env.sh $e; done
+for e in gateway ltx23 ltx25 wan_animate rvc parakeet breeze_tts qwen_image21 tbdub h3 qwen38; do scripts/build_env.sh $e; done
 
 # Web UI
 (cd gateway/ui && npm ci && npm run build)
@@ -49,6 +49,7 @@ Weights go under `$VISION_DATA_DIR/weights/<id>/`:
 | qwen_image21 | `weights/qwen_image21/{base,turbo}` | `models/qwen_image21/download_weights.sh` (not gated, ~31 GB each) |
 | tbdub | `weights/tbdub` | `models/tbdub/download_weights.sh` (not gated, ~15 GB; build the `tbdub` env first, the script uses its `hf`) |
 | h3 | `weights/h3/MiniMax-H3` | `models/h3/download_weights.sh` (not gated but under the MiniMax H3 Community License, ~210 GB; build the `h3` env first, the script uses its `hf`) |
+| qwen38 | `weights/qwen38/Qwen3.8-27B-FP8` | `models/qwen38/download_weights.sh` (not gated, ~29 GB; build the `qwen38` env first, the script uses its `hf`) |
 
 Applio looks up its pretrained files relative to its own folder, so those (`rvc/models/**`, `assets/config.json`) live inside `third_party/Applio` as git-ignored files. The submodule is configured with `ignore = untracked` so they never show up in `git status`.
 

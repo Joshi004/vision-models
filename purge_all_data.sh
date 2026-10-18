@@ -11,7 +11,9 @@
 #            row of the `jobs` and `uploads` tables in jobs.db.
 # Keeps:     jobs.db itself (and its schema, so a running gateway keeps
 #            working), the _uploads folder, and everything else in the data
-#            directory: envs/, weights/, wheels/, legacy/.
+#            directory: envs/, weights/, wheels/, legacy/, and metrics/ (the
+#            numbers-only usage log, e.g. metrics/h3_jobs.jsonl: no prompts or
+#            files, kept like jobs.db; delete that folder yourself to remove it).
 #
 # Safety:    refuses to run while any job is queued or running (cancel them
 #            first), and refuses unless the target folder is exactly
@@ -78,7 +80,7 @@ SIZE="$(du -sh "$JOBS_DIR" 2>/dev/null | cut -f1)"
 echo "Data directory: $DATA_DIR"
 echo "Will delete:    $JOB_FOLDERS job folder(s), $UPLOAD_FILES uploaded file(s), $OTHER_ENTRIES loose file(s) in $JOBS_DIR ($SIZE)"
 echo "                and all job and upload records in $DB"
-echo "Will keep:      jobs.db (schema), envs/, weights/, wheels/, legacy/"
+echo "Will keep:      jobs.db (schema), envs/, weights/, wheels/, legacy/, metrics/"
 
 if [ "$DRY_RUN" = "1" ]; then
   echo "Dry run: nothing was deleted."

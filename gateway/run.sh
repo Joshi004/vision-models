@@ -54,20 +54,33 @@
 #                                                      lip sync, and the most the lip-sync step may then take before it is stopped)
 #
 #   H3_MODEL_DIR                                      (default <data dir>/weights/h3/MiniMax-H3)
-#   H3_MEM_PER_GPU, H3_CPUS, H3_API_TIME              (MiniMax H3 backend's own Slurm allocation shape; every job holds 2 GPUs;
-#                                                      defaults 112G per GPU, 16 CPUs in total, 01:30:00 -- estimates, not yet measured)
+#   H3_MEM, H3_CPUS_PER_GPU, H3_API_TIME              (MiniMax H3 backend's own Slurm allocation shape; every job holds 4 or 8 GPUs, chosen
+#                                                      per request; defaults 256G for the whole job, 8 CPUs per GPU, and 01:30:00, which is
+#                                                      also the longest estimate a request may have -- estimates, not yet measured)
 #   H3_ATTENTION_BACKEND                              (diffusers attention backend for the H3 transformer; default _flash_3_hub
 #                                                      = FlashAttention-3 on Hopper. Set it to an empty string to use diffusers'
 #                                                      default instead. Needs the `kernels` package in envs/h3 and the
 #                                                      flash-attn3 kernel in the Hugging Face cache, because jobs run offline;
 #                                                      see docs/models/h3/README.md)
-#   H3_PARALLELISM                                    (how an H3 job's two GPUs share the denoising; default auto = ulysses for a video of
-#                                                      up to 10 s, split for a longer one, decided per request. ulysses = both GPUs
-#                                                      compute every step, each on half of the token sequence, each holding the whole
-#                                                      transformer. split = the transformer's blocks are divided between the GPUs:
-#                                                      slower, but ~45 GiB per GPU left for activations rather than ~17 GiB. Set
-#                                                      ulysses or split to force that mode for every request. Read when the gateway
-#                                                      starts, so restart the gateway to change it)
+#   H3_GPU_OPTIONS                                    (GPU counts an H3 job may be given, smallest first; default 4,8. Each request gets
+#                                                      the smallest that fits (see docs/models/h3/README.md, "Sizing"); set 4 to pin every
+#                                                      job to four GPUs, in which case a request that needs eight is refused with a 422)
+#   H3_ROWS_PER_GPU, H3_MAX_ENCODER_TOKENS            (the limits a request is sized against: the most rows of the denoising sequence per
+#                                                      GPU (default 40000) and the most tokens for the text encoder (default 60000). Initial
+#                                                      guesses, to be refitted from the usage log, $VISION_DATA_DIR/metrics/h3_jobs.jsonl)
+#   H3 jobs always denoise in "ulysses" mode (all GPUs compute every step); there is no H3_PARALLELISM setting any more.
+#   H3 settings above are read when the gateway starts, so restart the gateway to change them.
+#
+#   Qwen3.8 text backend (one shared vLLM server on one GPU, see docs/models/qwen38/README.md); every QWEN38_* variable
+#   you have set is passed on to the gateway:
+#   QWEN38_MODEL_DIR                      (default <data dir>/weights/qwen38/Qwen3.8-27B-FP8)
+#   QWEN38_STATE_DIR, QWEN38_CACHE_DIR    (default <data dir>/llm/qwen38 and <data dir>/cache/vllm)
+#   QWEN38_PARTITION                      (partition the server runs on; default: the fallback partition, which can pre-empt it.
+#                                          Set it to a non-pre-emptible partition for steady use)
+#   QWEN38_MEM_PER_GPU, QWEN38_CPUS, QWEN38_SERVER_TIME   (the server's Slurm allocation: default 64G, 8, 12:00:00)
+#   QWEN38_IDLE_MINUTES                   (stop the server after this many minutes without a request; default 20)
+#   QWEN38_STARTUP_TIMEOUT, QWEN38_REQUEST_TIMEOUT   (seconds a request may wait for the server / for its answer; default 1800, 1800)
+#   QWEN38_MAX_CONCURRENT                 (requests sent to the server at once; default 8)
 set -euo pipefail
 
 API_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,12 +93,19 @@ THIS_NODE="$(hostname)"
 NODE_FILE="$DATA_DIR/gateway.host"
 # `-` (not `:-`): unset -> FlashAttention-3; set but empty -> diffusers' default backend.
 H3_ATTENTION_BACKEND="${H3_ATTENTION_BACKEND-_flash_3_hub}"
-# Unset or empty -> auto. Checked here so a typo fails now, not in every H3 job.
-H3_PARALLELISM="${H3_PARALLELISM:-auto}"
-case "$H3_PARALLELISM" in
-  auto|ulysses|split) ;;
-  *) echo "ERROR: H3_PARALLELISM must be 'auto', 'ulysses' or 'split', got '$H3_PARALLELISM'." >&2; exit 1 ;;
+# H3 sizing settings. Unset or empty -> the default. Checked here so a typo fails now, not on every H3 request.
+H3_GPU_OPTIONS="${H3_GPU_OPTIONS:-4,8}"
+case "$H3_GPU_OPTIONS" in
+  4|8|4,8) ;;
+  *) echo "ERROR: H3_GPU_OPTIONS must be '4', '8' or '4,8', got '$H3_GPU_OPTIONS'." >&2; exit 1 ;;
 esac
+H3_ROWS_PER_GPU="${H3_ROWS_PER_GPU:-40000}"
+H3_MAX_ENCODER_TOKENS="${H3_MAX_ENCODER_TOKENS:-60000}"
+for setting in H3_ROWS_PER_GPU H3_MAX_ENCODER_TOKENS; do
+  case "${!setting}" in
+    ''|*[!0-9]*|0) echo "ERROR: $setting must be a positive whole number, got '${!setting}'." >&2; exit 1 ;;
+  esac
+done
 
 if [ -n "${MODEL_API_PORT:-}" ] && [ "$MODEL_API_PORT" != "$PORT" ]; then
   echo "Note: ignoring MODEL_API_PORT=$MODEL_API_PORT -- the gateway always runs on port $PORT."
@@ -154,9 +174,15 @@ if port_in_use; then
   exit 1
 fi
 
+# QWEN38_* settings (Qwen3.8 text backend) are handed to the gateway as they are.
+QWEN38_EXPORTS=""
+for name in $(compgen -e | grep '^QWEN38_' || true); do
+  QWEN38_EXPORTS+="export $name=$(printf '%q' "${!name}"); "
+done
+
 # 3. Start, then wait for the health check.
 tmux new-session -d -s "$SESSION" \
-  "export VISION_DATA_DIR='$DATA_DIR'; export H3_ATTENTION_BACKEND=$(printf '%q' "$H3_ATTENTION_BACKEND"); export H3_PARALLELISM=$(printf '%q' "$H3_PARALLELISM"); cd '$API_DIR' && '$DATA_DIR/envs/gateway/bin/uvicorn' server:app --host '$HOST' --port $PORT; exec bash"
+  "export VISION_DATA_DIR='$DATA_DIR'; $QWEN38_EXPORTS export H3_ATTENTION_BACKEND=$(printf '%q' "$H3_ATTENTION_BACKEND"); export H3_GPU_OPTIONS=$(printf '%q' "$H3_GPU_OPTIONS"); export H3_ROWS_PER_GPU=$(printf '%q' "$H3_ROWS_PER_GPU"); export H3_MAX_ENCODER_TOKENS=$(printf '%q' "$H3_MAX_ENCODER_TOKENS"); cd '$API_DIR' && '$DATA_DIR/envs/gateway/bin/uvicorn' server:app --host '$HOST' --port $PORT; exec bash"
 echo "$THIS_NODE $PORT" > "$NODE_FILE"
 
 echo -n "Starting on $THIS_NODE:$PORT "
@@ -175,7 +201,7 @@ fi
 
 echo "Running:  $HEALTH"
 echo "H3 attention backend: ${H3_ATTENTION_BACKEND:-default (diffusers)}"
-echo "H3 parallelism:       $H3_PARALLELISM"
+echo "H3 GPU options:       $H3_GPU_OPTIONS (ulysses; limits: $H3_ROWS_PER_GPU rows per GPU, $H3_MAX_ENCODER_TOKENS encoder tokens)"
 echo "Node:     $THIS_NODE   (forward port $PORT from THIS node)"
 echo "Tunnel:   ssh -N -L $PORT:localhost:$PORT <you>@$THIS_NODE   (or let Cursor/VS Code forward port $PORT)"
 echo "Attach:   tmux attach -t $SESSION   (Ctrl-b d to detach without stopping it)"

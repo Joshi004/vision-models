@@ -84,6 +84,9 @@ export function useSubmitJob(onSubmitted) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
   const [lastJobId, setLastJobId] = useState(null);
+  // The whole response of the last successful submit: for the backends that size their jobs (H3) it also says
+  // how many GPUs the job got and its estimated run time (`gpus`, `estimated_run_seconds`).
+  const [lastResult, setLastResult] = useState(null);
 
   async function submit(submitFn) {
     setSubmitting(true);
@@ -92,6 +95,7 @@ export function useSubmitJob(onSubmitted) {
       const result = await submitFn();
       rememberSubmittedJob(result.job_id);
       setLastJobId(result.job_id);
+      setLastResult(result);
       if (onSubmitted) onSubmitted();
       return result;
     } catch (err) {
@@ -102,7 +106,7 @@ export function useSubmitJob(onSubmitted) {
     }
   }
 
-  return { submit, submitting, error, lastJobId };
+  return { submit, submitting, error, lastJobId, lastResult };
 }
 
 // One row of ImageConditioningList, matching the API's ImageConditioning

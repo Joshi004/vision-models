@@ -3,6 +3,7 @@ import { getUncachedResult, isLoadingResult, loadResult, onResultLoaded } from '
 import { getCachedResult } from '../resultCache.js';
 import ProgressBar from './ProgressBar.jsx';
 import TranscriptView from './TranscriptView.jsx';
+import LlmResultView from './LlmResultView.jsx';
 import Button from './ui/Button.jsx';
 
 // Pipelines whose result is audio, not video -- rendered with an <audio>
@@ -43,6 +44,13 @@ function isTranscriptPipeline(pipeline) {
   return pipeline === 'parakeet:transcribe';
 }
 
+// qwen38:generate's result is a JSON document (answer text, parsed JSON,
+// optional reasoning, usage, timings) -- rendered with LlmResultView. See
+// services/qwen38/openapi_docs.py for the exact shape.
+function isLlmPipeline(pipeline) {
+  return pipeline === 'qwen38:generate';
+}
+
 // The extension to download this result as. Every other pipeline has one
 // fixed extension; rvc:convert is the one exception -- its own
 // export_format (read from `request`, the job's original stored request
@@ -50,7 +58,7 @@ function isTranscriptPipeline(pipeline) {
 // real extension, which is not always .wav.
 function resultExtension(pipeline, request) {
   if (isZipPipeline(pipeline)) return 'zip';
-  if (isTranscriptPipeline(pipeline)) return 'json';
+  if (isTranscriptPipeline(pipeline) || isLlmPipeline(pipeline)) return 'json';
   if (isImagePipeline(pipeline)) return 'png';
   if (pipeline === 'rvc:convert') return (request?.export_format || 'wav').toLowerCase();
   if (isAudioPipeline(pipeline)) return 'wav';
@@ -91,6 +99,7 @@ function resultExtension(pipeline, request) {
 export default function ResultPreview({ jobId, pipeline, request, incognito = false, serverCopyGone = false }) {
   const [url, setUrl] = useState(null);
   const [transcript, setTranscript] = useState(null);
+  const [llmResult, setLlmResult] = useState(null);
   const [progress, setProgress] = useState(null);
   const [error, setError] = useState(null);
   // Briefly true while the initial cache check (below) is in flight, so
@@ -103,6 +112,7 @@ export default function ResultPreview({ jobId, pipeline, request, incognito = fa
   const hasBlobRef = useRef(false);
 
   const isTranscript = isTranscriptPipeline(pipeline);
+  const isLlm = isLlmPipeline(pipeline);
 
   useEffect(() => {
     return () => {
@@ -125,6 +135,13 @@ export default function ResultPreview({ jobId, pipeline, request, incognito = fa
         setTranscript(JSON.parse(await blob.text()));
       } catch {
         setError('Could not parse the transcript JSON.');
+      }
+    }
+    if (isLlm) {
+      try {
+        setLlmResult(JSON.parse(await blob.text()));
+      } catch {
+        setError('Could not parse the result JSON.');
       }
     }
   }
@@ -184,11 +201,12 @@ export default function ResultPreview({ jobId, pipeline, request, incognito = fa
       {progress && <ProgressBar sentBytes={progress.receivedBytes} totalBytes={progress.totalBytes} label="Downloading" />}
       {error && <p className="text-xs text-danger">{error}</p>}
       {url && !isZip && isTranscript && transcript && <TranscriptView transcript={transcript} />}
-      {url && !isZip && !isTranscript && isAudio && <audio src={url} controls className="w-full max-w-md" />}
-      {url && !isZip && !isTranscript && isImage && (
+      {url && !isZip && isLlm && llmResult && <LlmResultView result={llmResult} />}
+      {url && !isZip && !isTranscript && !isLlm && isAudio && <audio src={url} controls className="w-full max-w-md" />}
+      {url && !isZip && !isTranscript && !isLlm && isImage && (
         <img src={url} alt="Generated result" className="w-full max-w-md rounded-md bg-checkerboard" />
       )}
-      {url && !isZip && !isTranscript && !isAudio && !isImage && (
+      {url && !isZip && !isTranscript && !isLlm && !isAudio && !isImage && (
         <video src={url} controls className="w-full max-w-md rounded-md" />
       )}
       {url && (

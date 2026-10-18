@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at TEXT,
     downloaded_at TEXT,
     incognito INTEGER NOT NULL DEFAULT 0,
-    lip_sync_json TEXT
+    lip_sync_json TEXT,
+    gpus INTEGER,
+    estimated_run_seconds REAL
 );
 
 CREATE TABLE IF NOT EXISTS uploads (
@@ -90,6 +92,13 @@ def init_db() -> None:
         # see run_pipeline_job.py); NULL for every job that did not ask for it.
         if "lip_sync_json" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN lip_sync_json TEXT")
+        # `gpus` and `estimated_run_seconds`: what the backend decided when the job was
+        # submitted (H3 sizes every request, see services/h3/sizing.py); NULL for every
+        # job of a backend that does not, and for jobs created before they existed.
+        if "gpus" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN gpus INTEGER")
+        if "estimated_run_seconds" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN estimated_run_seconds REAL")
 
 
 # --- jobs --------------------------------------------------------------
@@ -102,12 +111,26 @@ def create_job(
     request: dict[str, Any],
     partition: str | None = None,
     incognito: bool = False,
+    gpus: int | None = None,
+    estimated_run_seconds: float | None = None,
 ) -> None:
+    """`gpus` and `estimated_run_seconds` are what the backend decided at submit time, for
+    the backends that size their jobs (H3); None otherwise."""
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO jobs (job_id, pipeline, status, job_dir, partition, request_json, created_at, incognito) "
-            "VALUES (?, ?, 'queued', ?, ?, ?, ?, ?)",
-            (job_id, pipeline, str(job_dir), partition, json.dumps(request), _now(), 1 if incognito else 0),
+            "INSERT INTO jobs (job_id, pipeline, status, job_dir, partition, request_json, created_at, incognito, "
+            "gpus, estimated_run_seconds) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)",
+            (
+                job_id,
+                pipeline,
+                str(job_dir),
+                partition,
+                json.dumps(request),
+                _now(),
+                1 if incognito else 0,
+                gpus,
+                estimated_run_seconds,
+            ),
         )
 
 
@@ -184,6 +207,16 @@ def recent_run_seconds(pipeline: str, limit: int = 20) -> list[float]:
         finished = datetime.fromisoformat(row["finished_at"])
         durations.append((finished - started).total_seconds())
     return durations
+
+
+def list_finished_jobs(pipeline_prefix: str) -> list[sqlite3.Row]:
+    """Finished (succeeded or failed) jobs whose pipeline starts with this prefix (e.g. "h3:"), oldest
+    first -- backs the H3 usage log's backfill (scripts/h3_usage_log.py)."""
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT * FROM jobs WHERE finished_at IS NOT NULL AND substr(pipeline, 1, ?) = ? ORDER BY created_at",
+            (len(pipeline_prefix), pipeline_prefix),
+        ).fetchall()
 
 
 def list_finished_before(cutoff_iso: str) -> list[sqlite3.Row]:

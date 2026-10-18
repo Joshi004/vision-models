@@ -4,6 +4,31 @@ Dates are when a change shipped on this codebase, not necessarily when you're re
 `api_version` field (`GET /v1/guide?format=json`) is this server's own current version; compare it
 against what you last integrated against.
 
+- **0.16.1** (2026-10-18): Qwen3.8 (`POST /v1/qwen38/generate`): `max_tokens` now goes up to **49,152** (was
+  16,384) and the context window is 65,536 tokens (was 32,768). Long multi-part answers with thinking on (17 scenes of
+  frame and video prompts) were cut off at 16,384 with an empty answer because the reasoning used every token; they
+  need well over 20,000. A request may now run for up to 30 minutes (was 15). Additive, no other change.
+- **0.16.0** (2026-10-18): Added an eighth backend, the **Qwen3.8 text model** (Qwen3.8-27B, FP8; text in, text or
+  JSON out, no image/audio/video input): `POST /v1/qwen38/generate` returns a `job_id` like every other endpoint;
+  poll `GET /v1/jobs/{job_id}` and download `GET /v1/jobs/{job_id}/result` (JSON with `content`, `json`,
+  `reasoning`, `finish_reason`, `usage`, `timings`, `model`). Optional `json_schema` makes the answer always match a
+  schema; `thinking` turns reasoning on or off. Pipeline value `qwen38:generate`. Unlike every other backend it keeps
+  one shared server on one GPU: answers take seconds when the server is up, a request that arrives while it is
+  stopped stays `queued` while it starts (minutes), and it stops itself after 20 idle minutes. New endpoints
+  `GET /v1/qwen38/server` (state) and `POST /v1/qwen38/server/warm` (start it ahead of time). Jobs of this backend
+  report `queued` until the server picks them up. No change to any existing endpoint; the web UI has a "Text model"
+  entry. Declared the `Text model` tag.
+- **0.15.0** (2026-10-17): MiniMax H3 (`/v1/h3/videos/generate`, `/v1/h3/videos/audio-to-video`) now sizes every
+  request before queueing it and gives each job **4 or 8 GPUs** (it was always two). Additive: the submit response
+  (`JobSubmitResponse`), `GET /v1/jobs/{job_id}` and `GET /v1/jobs` gain `gpus` (how many GPUs the job was given) and
+  `estimated_run_seconds` (about how long it will run once started, queue wait not included; prefer it over
+  `typical_run_seconds` when present); both are `null` for every other backend and for jobs from before this
+  version. One behaviour change: a valid H3 request that is too big for the GPUs -- chiefly many or large reference
+  images, or reference videos on a long clip -- is now refused with **HTTP 422** and a sentence with the numbers
+  (nothing is queued), where before it was queued and failed with an out-of-memory error after loading the weights.
+  The size is judged from the prompt, the length and canvas, and the headers of the uploaded files. The limits and
+  the estimate are initial guesses and will be refitted; the 4/8-GPU layout has not been run to completion yet.
+  The web UI shows the GPU count and the estimate on each H3 job and after submitting.
 - **0.14.0** (2026-10-17): **Breaking change** on `POST /v1/h3/videos/audio-to-video` (MiniMax H3's reference mode),
   which now takes the model's full reference set: up to 9 images (`image_asset_ids`), 3 videos (`video_asset_ids`) and
   3 audio clips, 12 in all. (1) `audio_asset_id` (one audio, required) is **replaced by `audio_asset_ids`**, a list of

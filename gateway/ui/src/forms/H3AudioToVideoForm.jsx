@@ -105,7 +105,7 @@ export default function H3AudioToVideoForm({ defaultPartition, onSubmitted, init
   const [advancedOpen, setAdvancedOpen] = usePersistedState(`advancedOpen:${FORM_ID}`, false);
 
   const schemas = useSchemas();
-  const { submit, submitting, error, lastJobId } = useSubmitJob(onSubmitted);
+  const { submit, submitting, error, lastJobId, lastResult } = useSubmitJob(onSubmitted);
 
   const { prompt, images, videos, audios, steps, seed, shape, partition } = values;
 
@@ -162,7 +162,7 @@ export default function H3AudioToVideoForm({ defaultPartition, onSubmitted, init
   return (
     <FormShell
       title="Audio to video (MiniMax H3)"
-      description="Video with generated stereo sound from up to 9 reference images, 3 videos and 3 audio clips (12 in all; at least one image or video, audio is optional). Images are references for how people, places and styles look, not first or last frames: the prompt says who appears and when. Audio is a reference the model reads and then makes its own soundtrack from; it is NOT muxed into the result unchanged (for your exact recording, use LTX audio to video with lip sync). A reference video that has sound also gives its soundtrack to the model unless you switch that off. Every job holds two GPUs and starts cold. The prompt reaches the model exactly as typed and is expected in H3's six-part reference format -- see the MiniMax H3 section of /v1/guide."
+      description="Video with generated stereo sound from up to 9 reference images, 3 videos and 3 audio clips (12 in all; at least one image or video, audio is optional). Images are references for how people, places and styles look, not first or last frames: the prompt says who appears and when. Audio is a reference the model reads and then makes its own soundtrack from; it is NOT muxed into the result unchanged (for your exact recording, use LTX audio to video with lip sync). A reference video that has sound also gives its soundtrack to the model unless you switch that off. Every job holds 4 or 8 GPUs, chosen from the size of the request (the response says how many, with an estimated run time), and starts cold. A request too big for the GPUs is refused with the reason. The prompt reaches the model exactly as typed and is expected in H3's six-part reference format -- see the MiniMax H3 section of /v1/guide."
       endpoint="POST /v1/h3/videos/audio-to-video"
       prefillJob={prefillJob}
       onClearPrefill={onClearPrefill}
@@ -173,6 +173,7 @@ export default function H3AudioToVideoForm({ defaultPartition, onSubmitted, init
       submitting={submitting}
       error={error}
       lastJobId={lastJobId}
+      lastResult={lastResult}
       submitLabel="Generate video"
       onSubmit={handleSubmit}
     >

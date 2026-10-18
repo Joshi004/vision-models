@@ -98,6 +98,7 @@ export default function JobRow({
         <JobTimingSummary job={job} now={now} />
         <span className="font-mono text-xs text-muted">{job.job_id.slice(0, 8)}</span>
         {job.partition && <span className="text-xs text-muted">partition: {job.partition}</span>}
+        {job.gpus != null && <span className="text-xs text-muted">{job.gpus} GPUs</span>}
         <ChevronDownIcon className={`ml-auto h-4 w-4 shrink-0 text-muted transition-transform ${expanded ? 'rotate-180' : ''}`} />
       </button>
 
