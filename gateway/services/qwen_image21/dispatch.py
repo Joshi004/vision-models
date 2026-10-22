@@ -1,12 +1,16 @@
-"""Builds Qwen-Image-2.1's invocation and submits it as a Slurm job.
+"""Builds Qwen-Image-2.1's invocation and queues it for a warm worker.
 
-The job runs models/qwen_image21/runner/run_generate.py (with that model's own
-environment). See services/breeze_tts/dispatch.py for the fuller rationale
-behind the submission plumbing mirrored here (capacity check, partial-path
-rename convention enforced by common/run_pipeline_job.py).
+Unlike most backends a request has no Slurm job of its own: up to
+config.MAX_WORKERS long-lived worker jobs (models/qwen_image21/runner/worker.py,
+with that model's own environment) each load a checkpoint once and serve queued
+requests one at a time. common/worker_pool.py starts, feeds and stops them;
+this module only writes the job's files (args.json, output_path.txt: the same
+partial-path-rename convention common/run_pipeline_job.py enforces for cold
+jobs, which models/common/pool_worker.py follows) and puts the request in the
+queue.
 
 Text-like values are passed as `--flag=value` single argv entries (and the
-job is launched from args.json, never through a shell string), so user text
+request is read from args.json, never through a shell string), so user text
 needs no escaping and can safely start with "-" or contain quotes/newlines.
 """
 
@@ -14,18 +18,18 @@ from __future__ import annotations
 
 import json
 import shlex
-import subprocess
 from pathlib import Path
 
 from common import config as common_config
-from common import job_store, retention, storage
+from common import job_store, storage
 from common.slurm import resolve_partition
+from common.worker_pool import PoolError, PoolRequest, WorkerPool
 from services.qwen_image21 import config
 from services.qwen_image21.schemas import QwenImageEditRequest, QwenImageGenerateRequest
 
 
 class DispatchError(RuntimeError):
-    """Could not submit the job (sbatch failure, ...)."""
+    """Could not queue the request (no worker could be started, ...)."""
 
 
 class CapacityError(RuntimeError):
@@ -54,8 +58,8 @@ def _check_image_extension(path: Path) -> None:
 
 def build_args(req: QwenImageGenerateRequest | QwenImageEditRequest, output_path: Path) -> list[str]:
     """Args *after* the interpreter+script path, matching run_generate.py's
-    own CLI. --output-path is already set to `output_path`; _submit_slurm_job
-    rewrites it to a partial path before actually submitting."""
+    own CLI. --output-path is already set to `output_path`; _write_job_files
+    rewrites it to a partial path before the request is queued."""
     args = [
         "--model-dir", str(config.MODEL_DIR_BY_MODE[req.mode]),
         "--mode", req.mode,
@@ -76,11 +80,9 @@ def build_args(req: QwenImageGenerateRequest | QwenImageEditRequest, output_path
     return args
 
 
-def _submit_slurm_job(
-    job_id: str, job_dir: Path, module_args: list[str], output_path: Path, partition: str, incognito: bool
-) -> str:
-    """Write args.json + submit via sbatch (non-blocking). Returns the Slurm
-    job id."""
+def _write_job_files(job_dir: Path, module_args: list[str], output_path: Path) -> None:
+    """args.json (the full argv of a cold run of run_generate.py, with --output-path rewritten to the
+    partial file) and output_path.txt (the final path), read by the worker."""
     partial_path = job_dir / f"output.partial{output_path.suffix}"
     args = list(module_args)
     idx = args.index("--output-path")
@@ -90,30 +92,46 @@ def _submit_slurm_job(
     (job_dir / "args.json").write_text(json.dumps(full_argv))
     (job_dir / "output_path.txt").write_text(str(output_path))
 
-    wrap_argv = ["python3", str(config.RUN_PIPELINE_JOB_SCRIPT), str(job_dir)]
-    wrap_str = "HF_HUB_OFFLINE=1 " + shlex.join(wrap_argv)
-    sbatch_cmd = [
+
+def _worker_sbatch_command(worker_id: str, worker_dir: Path, key: str, partition: str, gpus: int) -> list[str]:
+    """The sbatch command for one warm worker. `key` is the request mode (fast or quality)."""
+    worker_argv = [
+        str(config.QWEN_IMAGE21_PYTHON),
+        str(config.WORKER_SCRIPT),
+        "--worker-dir", str(worker_dir),
+        "--model-dir", str(config.MODEL_DIR_BY_MODE[key]),
+        "--mode", key,
+        # A safety net only: the gateway stops an idle worker after IDLE_MINUTES.
+        "--idle-exit-seconds", str(int(config.IDLE_MINUTES * 60 * 2)),
+    ]
+    return [
         "sbatch",
         "--parsable",
         f"--partition={partition}",
-        "--gres=gpu:1",
+        f"--gres=gpu:{gpus}",
         f"--cpus-per-task={config.CPUS_PER_GPU}",
         f"--mem-per-gpu={config.MEM_PER_GPU}",
-        f"--time={config.JOB_TIME_LIMIT}",
-        f"--job-name={common_config.SLURM_JOB_NAME_PREFIX}qwen-image21-api-{job_id[:8]}",
-        f"--output={retention.slurm_log_path(job_dir, incognito)}",
-        f"--wrap={wrap_str}",
+        f"--time={config.WORKER_TIME_LIMIT}",
+        f"--job-name={common_config.SLURM_JOB_NAME_PREFIX}qwen-image21-worker-{worker_id[:8]}",
+        f"--output={worker_dir / 'worker.log'}",
+        f"--wrap=HF_HUB_OFFLINE=1 {shlex.join(worker_argv)}",
     ]
-    result = subprocess.run(sbatch_cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise DispatchError(f"sbatch failed: {result.stderr.strip() or result.stdout.strip()}")
-    return result.stdout.strip().split(";")[0]  # --parsable prints "<id>" or "<id>;<cluster>"
+
+
+pool = WorkerPool(
+    "qwen_image21",
+    pipelines=("qwen-image21:generate", "qwen-image21:edit"),
+    max_workers=config.MAX_WORKERS,
+    idle_seconds=config.IDLE_MINUTES * 60,
+    worker_time_seconds=config.worker_time_limit_seconds(),
+    build_sbatch_command=_worker_sbatch_command,
+)
 
 
 def _dispatch(req: QwenImageGenerateRequest | QwenImageEditRequest, pipeline: str) -> str:
     """Validate capacity + reference assets, then create the job directory/DB
-    row/Slurm job, in that order, so an invalid request never leaves debris
-    behind."""
+    row and queue the request, in that order, so an invalid request never
+    leaves debris behind."""
     _check_capacity()
     partition = resolve_partition(req.partition)
     job_id = job_store.new_id()
@@ -128,11 +146,20 @@ def _dispatch(req: QwenImageGenerateRequest | QwenImageEditRequest, pipeline: st
     job_dir.mkdir(parents=True)
     job_store.create_job(job_id, pipeline, job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito)
     try:
-        slurm_job_id = _submit_slurm_job(job_id, job_dir, module_args, output_path, partition, req.incognito)
-    except DispatchError:
-        job_store.mark_failed(job_id, "Could not submit the Slurm job.")
-        raise
-    job_store.set_slurm_job_id(job_id, slurm_job_id)
+        _write_job_files(job_dir, module_args, output_path)
+        pool.enqueue(
+            PoolRequest(
+                job_id=job_id,
+                key=req.mode,
+                partition=partition,
+                gpus=1,
+                limit_seconds=config.job_time_limit_seconds(),
+            ),
+            job_dir,
+        )
+    except (OSError, PoolError) as e:
+        job_store.mark_failed(job_id, "Could not queue the request.")
+        raise DispatchError(str(e)) from e
     return job_id
 
 

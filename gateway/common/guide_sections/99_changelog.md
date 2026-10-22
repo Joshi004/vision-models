@@ -4,6 +4,15 @@ Dates are when a change shipped on this codebase, not necessarily when you're re
 `api_version` field (`GET /v1/guide?format=json`) is this server's own current version; compare it
 against what you last integrated against.
 
+- **0.17.0** (2026-10-22): **Qwen-Image-2.1 and MiniMax H3 now reuse loaded weights between requests.** Instead of one
+  GPU job per request, each backend keeps up to 8 long-lived GPU jobs (operator settings `QWEN_IMAGE21_MAX_WORKERS`,
+  `H3_MAX_WORKERS`) that run requests one after another and are stopped after 10 idle minutes
+  (`QWEN_IMAGE21_IDLE_MINUTES`, `H3_IDLE_MINUTES`). A request that finds a loaded GPU job free is much faster than a
+  cold start (a tiny H3 request: 441 s cold, 77 s on a loaded one); with more requests than GPU jobs the extra ones wait
+  `queued`, and a request `running` is one a GPU job has taken. Behaviour changes: cancelling a request that is
+  already running stops its whole GPU job (the next request starts cold), and a request that runs past its time limit
+  fails with a message saying so. No endpoint, field or request changed. H3's `estimated_run_seconds` still assumes a
+  cold start, so a request on a loaded GPU job finishes sooner than estimated.
 - **0.16.1** (2026-10-18): Qwen3.8 (`POST /v1/qwen38/generate`): `max_tokens` now goes up to **49,152** (was
   16,384) and the context window is 65,536 tokens (was 32,768). Long multi-part answers with thinking on (17 scenes of
   frame and video prompts) were cut off at 16,384 with an empty answer because the reasoning used every token; they

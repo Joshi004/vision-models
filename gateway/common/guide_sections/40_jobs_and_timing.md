@@ -5,13 +5,15 @@
 seconds is plenty**; every job takes minutes at an absolute minimum, so polling faster wastes calls
 for no benefit.
 
-**Why "queued" can last a while:** every request dynamically submits a new job to this cluster's
-job scheduler. Except for the Qwen3.8 text model (below), no backend here keeps a resident, "warm"
-model in GPU memory across requests -- each job cold-starts by loading model weights from storage
-before it does any actual work, then releases its allocation afterward. The Qwen3.8 text model keeps
-one shared server running while it is in use and stops it after a period without requests: its
-requests are answered in seconds when the server is up, and a request that arrives while it is
-stopped stays `queued` for the several minutes the server takes to start. On top of that cold start, a job can also sit genuinely queued for a while
+**Why "queued" can last a while:** most backends submit a new job to this cluster's job scheduler for
+every request. That job cold-starts by loading model weights from storage before it does any actual
+work, then releases its allocation afterward. Three backends keep GPU work running between requests
+instead. The Qwen3.8 text model keeps one shared server running while it is in use and stops it after a
+period without requests: its requests are answered in seconds when the server is up, and a request that
+arrives while it is stopped stays `queued` for the several minutes the server takes to start.
+Qwen-Image-2.1 and MiniMax H3 keep a limited number of long-lived GPU jobs (at most 8 of each, stopped after 10
+idle minutes): a request that finds one free starts at once, and loads much faster than a cold start when its
+GPU job has run a request before; otherwise it stays `queued` until a GPU job has started or become free. On top of that cold start, a job can also sit genuinely queued for a while
 if the cluster is busy; that queue wait has no fixed upper bound. Budget at least several minutes
 per request before any backend-specific timing on top of that -- see each backend's own section
 below for real measured numbers.

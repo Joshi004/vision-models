@@ -70,7 +70,8 @@ def default_condition_resolution(image_count: int) -> int:
     return 768
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """`argv` is the flags only (no script name); None reads the real command line."""
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model-dir", required=True, type=Path, help="Local diffusers checkpoint directory.")
     p.add_argument("--mode", required=True, choices=["fast", "quality"])
@@ -82,7 +83,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--steps", type=int, default=40, help="Quality mode only.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--condition-resolution", type=int, help="Edit only: side length whose area each reference image is resized to (default: chosen from the image count).")
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     if (args.width is None) != (args.height is None):
         p.error("--width and --height must be given together.")
@@ -96,21 +97,32 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def main() -> int:
-    args = parse_args()
-
+def configure_environment() -> None:
+    """Must run before torch is imported."""
     # Less fragmentation at 2K: an out-of-memory failure here reported ~11 GiB reserved but unusable.
     os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
+
+def load_pipeline(model_dir: Path, mode: str):
+    """Load a checkpoint onto the GPU. The slow part of a request (about 4 minutes on this cluster)."""
     # Imported late so --help and argument errors stay fast and torch-free.
     import torch
     from diffusers import QwenImage21Pipeline
-    from PIL import Image
 
     started = time.time()
-    print(f"Loading {args.model_dir} ({args.mode})", flush=True)
-    pipe = QwenImage21Pipeline.from_pretrained(args.model_dir, torch_dtype=torch.bfloat16).to("cuda")
+    print(f"Loading {model_dir} ({mode})", flush=True)
+    pipe = QwenImage21Pipeline.from_pretrained(model_dir, torch_dtype=torch.bfloat16).to("cuda")
     print(f"Loaded in {time.time() - started:.0f}s", flush=True)
+    return pipe
+
+
+def generate(pipe, args: argparse.Namespace, started: float) -> int:
+    """Run one request on a loaded pipeline and write args.output_path. `started` is when the request's
+    own work began (for the "total" line). Exit code 0 only if the file was written."""
+    import torch
+    from PIL import Image
+
+    torch.cuda.reset_peak_memory_stats()  # the peak below is this request's, not an earlier one's
 
     call_kwargs: dict = {
         "prompt": args.prompt,
@@ -152,6 +164,14 @@ def main() -> int:
         return 1
     print(f"Wrote {args.output_path} (total {time.time() - started:.0f}s)", flush=True)
     return 0
+
+
+def main() -> int:
+    args = parse_args()
+    configure_environment()
+    started = time.time()
+    pipe = load_pipeline(args.model_dir, args.mode)
+    return generate(pipe, args, started)
 
 
 if __name__ == "__main__":

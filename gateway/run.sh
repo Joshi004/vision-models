@@ -47,7 +47,11 @@
 #   BREEZE_TTS_MAX_TEXT_CHARS                         (default 1000)
 #
 #   QWEN_IMAGE21_BASE_DIR, QWEN_IMAGE21_TURBO_DIR     (default <data dir>/weights/qwen_image21/{base,turbo})
-#   QWEN_IMAGE21_MEM_PER_GPU, QWEN_IMAGE21_CPUS, QWEN_IMAGE21_JOB_TIME   (Qwen-Image-2.1 backend's own Slurm allocation shape)
+#   QWEN_IMAGE21_MEM_PER_GPU, QWEN_IMAGE21_CPUS, QWEN_IMAGE21_JOB_TIME   (Qwen-Image-2.1 backend's own Slurm allocation shape;
+#                                                      JOB_TIME, default 00:30:00, is the longest one request may run)
+#   QWEN_IMAGE21_MAX_WORKERS                          (most warm image workers (1 GPU each) running at once; default 8)
+#   QWEN_IMAGE21_IDLE_MINUTES                         (stop a worker after this many minutes without a request; default 10)
+#   QWEN_IMAGE21_WORKER_TIME                          (Slurm time limit of a worker; default 12:00:00)
 #   QWEN_IMAGE21_MAX_PROMPT_CHARS                     (default 8000)
 #   TBDUB_MEM_PER_GPU, TBDUB_CPUS, TBDUB_API_TIME     (TBDub lip-sync backend's own Slurm allocation shape; defaults 64G, 8, 02:00:00)
 #   TBDUB_LIPSYNC_EXTRA_SECONDS                       (default 1800: time added to an LTX audio-to-video job's limit when it asks for
@@ -68,6 +72,9 @@
 #   H3_ROWS_PER_GPU, H3_MAX_ENCODER_TOKENS            (the limits a request is sized against: the most rows of the denoising sequence per
 #                                                      GPU (default 40000) and the most tokens for the text encoder (default 60000). Initial
 #                                                      guesses, to be refitted from the usage log, $VISION_DATA_DIR/metrics/h3_jobs.jsonl)
+#   H3_MAX_WORKERS                                    (most warm H3 workers (4 or 8 GPUs each) running at once; default 8)
+#   H3_IDLE_MINUTES                                   (stop a worker after this many minutes without a request; default 10)
+#   H3_WORKER_TIME                                    (Slurm time limit of a worker; default 12:00:00; must exceed H3_API_TIME)
 #   H3 jobs always denoise in "ulysses" mode (all GPUs compute every step); there is no H3_PARALLELISM setting any more.
 #   H3 settings above are read when the gateway starts, so restart the gateway to change them.
 #
@@ -174,9 +181,10 @@ if port_in_use; then
   exit 1
 fi
 
-# QWEN38_* settings (Qwen3.8 text backend) are handed to the gateway as they are.
+# QWEN38_* settings (Qwen3.8 text backend) and the warm-worker settings of the image and H3 backends
+# are handed to the gateway as they are.
 QWEN38_EXPORTS=""
-for name in $(compgen -e | grep '^QWEN38_' || true); do
+for name in $(compgen -e | grep -E '^(QWEN38_.*|QWEN_IMAGE21_(MAX_WORKERS|IDLE_MINUTES|WORKER_TIME)|H3_(MAX_WORKERS|IDLE_MINUTES|WORKER_TIME))$' || true); do
   QWEN38_EXPORTS+="export $name=$(printf '%q' "${!name}"); "
 done
 

@@ -20,7 +20,8 @@ Image generation and editing with [Qwen-Image-2.1](https://huggingface.co/Qwen/Q
 models/qwen_image21/
   download_weights.sh    fetches both checkpoints (neither is gated)
   env/requirements.lock.txt   frozen environment (python 3.12, torch 2.9.1+cu128, transformers 5.19.0, diffusers from git)
-  runner/run_generate.py      entrypoint the gateway's Slurm job runs
+  runner/run_generate.py      one request, run cold from the command line (also the load/generate code the worker uses)
+  runner/worker.py            the long-lived worker the gateway starts: loads once, then serves queued requests
 $VISION_DATA_DIR/envs/qwen_image21/         built with scripts/build_env.sh qwen_image21
 $VISION_DATA_DIR/weights/qwen_image21/{base,turbo}   ~31 GB each
 ```
@@ -56,6 +57,26 @@ $VISION_DATA_DIR/envs/qwen_image21/bin/python models/qwen_image21/runner/run_gen
 | edit, 10 references @2048 (the pipeline default) | not measured | over 11 min, cancelled | impractical |
 
 Everything runs with no CPU offload on one 80 GB GPU. The runner sets `PYTORCH_ALLOC_CONF=expandable_segments:True` and shrinks the reference images as their number grows (`default_condition_resolution` in `run_generate.py`), which is the one real quality trade-off: with several references, fine detail from them is preserved less well.
+
+## Warm workers
+
+A request does not get a Slurm job of its own. The gateway keeps up to `QWEN_IMAGE21_MAX_WORKERS` (default 8) long-lived one-GPU
+Slurm jobs (`runner/worker.py`, started and fed by `gateway/common/worker_pool.py`). A worker loads one checkpoint, then serves
+queued requests one at a time: `QwenImage21Pipeline` keeps no state between calls, so reuse is safe. The gateway is the only
+process that hands out work, by writing each request into the worker's folder under `$VISION_DATA_DIR/pools/qwen_image21/`.
+
+- Workers are separate for `fast` (Turbo) and `quality` (base). A worker with nothing to do for `QWEN_IMAGE21_IDLE_MINUTES`
+  (default 10) is stopped; at the cap, the longest-idle worker is stopped to make room for one of the other mode. A worker is
+  replaced before its own Slurm time (`QWEN_IMAGE21_WORKER_TIME`, 12 h) cannot fit another request.
+- `QWEN_IMAGE21_JOB_TIME` (30 min) is now the longest **one request** may run. A request that runs past it is stopped with its
+  worker and fails with a message saying so. Cancelling a running request stops its worker the same way. A request that fails
+  also ends its worker, so a failure such as running out of GPU memory never leaves a damaged process serving.
+- A queued request stays `queued` (no Slurm job id) until a worker takes it; the job becomes `running` when it is handed over.
+- Measured on this cluster (isolated test gateway, cap 2, four `fast` requests): a worker took about 5 minutes (294 s) to load
+  on a cold node; handing a request to a loaded worker took about 1 s; the first image of a fresh worker took about 49 s longer
+  than the next ones (CUDA warm-up). The gateway's poller sees a finished file about 22-25 s late on this shared filesystem, as
+  it does for every backend.
+- On a gateway restart the pool reads the workers' state files and adopts the live ones, so requests running at that moment finish.
 
 ## Data retention
 

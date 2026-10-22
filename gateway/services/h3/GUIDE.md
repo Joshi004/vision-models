@@ -168,14 +168,20 @@ fills the list from the old field.
 ### 6. Job lifecycle, timing and resources
 
 Identical to the other backends: submit, poll `GET /v1/jobs/{job_id}` every 10-15 seconds, then download
-`GET /v1/jobs/{job_id}/result`. Every request is an independent cold start -- there is no warm model between
-requests -- on **4 or 8 H100s on one node**, chosen when you submit (see "How a request is sized" below). While the
+`GET /v1/jobs/{job_id}/result`. A request runs on **4 or 8 H100s on one node**, chosen when you submit (see "How a
+request is sized" below). Requests are run by long-lived GPU jobs that the server keeps for a while: a request that finds
+one free and ready starts at once, otherwise it stays `queued` until a job has started or become free. While the
 prompt and references are read, the Qwen3-VL-32B encoder (62 GiB of bf16 weights) is split over two of the GPUs and the
 33B transformer (61.7 GiB) sits on the first. Then the transformer is copied to every GPU and **all of them compute
 every denoising step together**, each on its own share of the token sequence ("ulysses" context parallelism), so the
 more GPUs, the less activation memory each one needs and the faster each step runs. The weights are read from network
-storage on every job, so most of a short job's wall time is loading (about 5 minutes when one job loads, longer when
-several load at once).
+storage when a GPU job starts, so a short request that has to start one spends most of its wall time loading (about 5
+to 8 minutes, longer when several load at once). A request that runs on a GPU job that has already run one finds the
+weights cached on that machine and loads in seconds: a tiny request measured 441 s from cold and 77 s the second time.
+A GPU job with nothing to do for 10 minutes is stopped (operator setting `H3_IDLE_MINUTES`), and at most 8 run at
+once (`H3_MAX_WORKERS`), so with many requests at once some wait `queued` for a free one. `estimated_run_seconds`
+assumes a cold start, so a request that runs on an already-loaded GPU job finishes sooner than estimated.
+Cancelling a request that is already running stops its GPU job, so the next request starts cold.
 
 **How many GPUs, and how long.** The submit response and `GET /v1/jobs/{job_id}` (and `GET /v1/jobs`) carry two numbers
 that only this backend sets: `gpus`, how many GPUs the job was given, and `estimated_run_seconds`, about how long it

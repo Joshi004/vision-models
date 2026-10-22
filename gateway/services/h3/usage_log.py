@@ -23,6 +23,10 @@ A record has:
   setup        the request's shape read from args.json, only when there is no sizing
   parsed_log   timings read from run.log, only when there are no metrics (older jobs)
   slurm        state, node, elapsed_s, max_rss_gib from sacct (when it answers)
+  worker_id,   only for a request that ran on a warm worker (services/h3/dispatch.py): the worker, and whether
+  warm         it had already run a request (so the checkpoints were in the node's page cache). Its `slurm`
+               is then this request's run time (elapsed_s, from jobs.db) and node, and max_rss_gib is null,
+               because sacct's figures would be the worker's, not the request's.
 """
 
 from __future__ import annotations
@@ -45,6 +49,9 @@ METRICS_DIR = common_config.DATA_DIR / "metrics"
 LOG_PATH = METRICS_DIR / "h3_jobs.jsonl"
 
 _MAX_WORKERS = 7  # a job has at most 8 GPUs, so workers 1..7
+
+# Written by common/worker_pool.py into the folder of a request that ran on a warm worker.
+POOL_ASSIGNMENT_FILE = "pool_assignment.json"
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +295,21 @@ def build_record(row: sqlite3.Row, source: str = "live") -> dict:
         record["parsed_log"] = _parse_run_log(job_dir)
     if sizing is None:
         record["setup"] = _setup_from_args(job_dir)
-    record["slurm"] = _read_slurm(row["slurm_job_id"])
+    assignment = _read_json(job_dir / POOL_ASSIGNMENT_FILE)
+    if assignment is None:
+        record["slurm"] = _read_slurm(row["slurm_job_id"])
+    else:
+        # A warm worker's Slurm job runs many requests, so sacct's elapsed time and peak RAM belong to
+        # the worker, not to this request: the time is this request's run time instead, and there is no RAM figure.
+        record["worker_id"] = assignment.get("worker_id")
+        record["warm"] = assignment.get("warm")
+        run_metrics = metrics.get("run") or {}
+        record["slurm"] = {
+            "state": None,
+            "elapsed_s": None if record["run_s"] is None else int(record["run_s"]),
+            "node": run_metrics.get("node"),
+            "max_rss_gib": None,
+        }
     return record
 
 
@@ -309,21 +330,36 @@ def record(job_id: str) -> None:
         logger.exception("usage log: could not record job %s", job_id)
 
 
-def logged_slurm_job_ids() -> set[str]:
-    """The Slurm job ids already in the log, so a backfill never writes a job twice."""
-    ids: set[str] = set()
+def _record_key(slurm_job_id, worker_id, job_id) -> str | None:
+    """What identifies a job in the log: its own Slurm job id, or for a request that ran on a warm worker
+    (whose Slurm job is shared by many requests) its job id."""
+    if worker_id:
+        return f"job:{job_id}" if job_id else None
+    return str(slurm_job_id) if slurm_job_id else None
+
+
+def logged_job_keys() -> set[str]:
+    """The keys (see _record_key) of the jobs already in the log, so a backfill never writes a job twice."""
+    keys: set[str] = set()
     try:
         with LOG_PATH.open(encoding="utf-8") as log_file:
             for line in log_file:
                 try:
-                    slurm_job_id = json.loads(line).get("slurm_job_id")
+                    entry = json.loads(line)
                 except ValueError:
                     continue
-                if slurm_job_id:
-                    ids.add(str(slurm_job_id))
+                key = _record_key(entry.get("slurm_job_id"), entry.get("worker_id"), entry.get("job_id"))
+                if key:
+                    keys.add(key)
     except OSError:
         pass
-    return ids
+    return keys
+
+
+def job_key(row: sqlite3.Row) -> str | None:
+    """The key of a finished job row, as _record_key makes it for the log."""
+    pooled = (Path(row["job_dir"]) / POOL_ASSIGNMENT_FILE).exists()
+    return _record_key(row["slurm_job_id"], pooled, row["job_id"])
 
 
 def flatten(value, prefix: str = "") -> dict:

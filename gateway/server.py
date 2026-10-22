@@ -37,7 +37,18 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
-from common import config, guide, job_store, openapi_docs, partition_status, poller, purge, retention, storage
+from common import (
+    config,
+    guide,
+    job_store,
+    openapi_docs,
+    partition_status,
+    poller,
+    purge,
+    retention,
+    storage,
+    worker_pool,
+)
 from common.schemas import (
     CancelResponse,
     GuideResponse,
@@ -82,6 +93,7 @@ logger = logging.getLogger("model-api")
 
 _poller_task: asyncio.Task | None = None
 _qwen38_idle_task: asyncio.Task | None = None
+_pool_tasks: list[asyncio.Task] = []
 
 
 @contextlib.asynccontextmanager
@@ -90,6 +102,11 @@ async def lifespan(_app: FastAPI):
     job_store.init_db()
     # Qwen3.8 requests are tasks inside this process; whatever a restart interrupted can never finish.
     qwen38_dispatch.fail_orphaned_jobs()
+    # Warm worker pools (Qwen-Image-2.1, H3): find the workers still running and the requests still
+    # queued from before this start, then keep them scheduled. The workers keep running if this stops.
+    for pool in worker_pool.pools():
+        await asyncio.to_thread(pool.recover)
+        _pool_tasks.append(asyncio.create_task(pool.watch_forever()))
     global _poller_task, _qwen38_idle_task
     _poller_task = asyncio.create_task(poller.poll_forever())
     _qwen38_idle_task = asyncio.create_task(qwen38_server.idle_watch_forever())
@@ -97,7 +114,7 @@ async def lifespan(_app: FastAPI):
         logger.warning("docs lint: %s", warning)
     logger.info("model-api ready.")
     yield
-    for task in (_poller_task, _qwen38_idle_task):
+    for task in (_poller_task, _qwen38_idle_task, *_pool_tasks):
         if task is not None:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -106,7 +123,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="GPU Cluster Model-Serving API",
-    version="0.16.1",
+    version="0.17.0",
     description=openapi_docs.APP_DESCRIPTION,
     openapi_tags=openapi_docs.TAGS_METADATA,
     lifespan=lifespan,
@@ -426,7 +443,10 @@ def cancel_job(job_id: _JOB_ID_PARAM) -> CancelResponse:
         raise HTTPException(404, "Unknown job_id.")
     if row["status"] not in ("queued", "running"):
         return CancelResponse(cancelled=False, reason=f"job already {row['status']}")
-    if row["slurm_job_id"]:
+    # A warm-pool job has no Slurm job of its own: its slurm_job_id is a worker's, which may already
+    # be running someone else's request, so only the pool may decide what to stop (worker_pool.cancel_job).
+    handled_by_pool = worker_pool.cancel_job(job_id, row["slurm_job_id"])
+    if not handled_by_pool and row["slurm_job_id"]:
         cancel_slurm_job(row["slurm_job_id"])
     if row["pipeline"].startswith("qwen38:"):
         # No Slurm job of its own: stop the request; the shared model server keeps running.

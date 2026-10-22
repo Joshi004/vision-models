@@ -34,12 +34,12 @@ from services.h3 import usage_log  # noqa: E402
 
 
 def backfill(dry_run: bool) -> int:
-    already_logged = usage_log.logged_slurm_job_ids()
+    already_logged = usage_log.logged_job_keys()
     added = 0
     skipped_logged = 0
     skipped_gone = 0
     for row in job_store.list_finished_jobs("h3:"):
-        if row["slurm_job_id"] in already_logged:
+        if usage_log.job_key(row) in already_logged:
             skipped_logged += 1
         elif not Path(row["job_dir"]).is_dir():
             skipped_gone += 1  # nothing left to read (deleted by retention or incognito)

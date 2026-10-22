@@ -16,6 +16,15 @@ from common import config
 logger = logging.getLogger("model-api.slurm")
 
 
+def slurm_time_seconds(value: str, setting_name: str) -> int:
+    """A Slurm HH:MM:SS time limit (as every service config here writes it) in seconds."""
+    parts = value.split(":")
+    if len(parts) != 3 or not all(part.isdigit() for part in parts):
+        raise RuntimeError(f"{setting_name} must look like HH:MM:SS, got {value!r}.")
+    hours, minutes, seconds = (int(part) for part in parts)
+    return hours * 3600 + minutes * 60 + seconds
+
+
 def cancel_slurm_job(slurm_job_id: str) -> None:
     """Best-effort `scancel` -- generic across every backend, since cancelling
     a Slurm job doesn't depend on which backend submitted it."""

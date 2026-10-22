@@ -34,8 +34,14 @@ local edits in words.
 **Output:** a PNG (`output.png`, RGB or RGBA) via `GET /v1/jobs/{job_id}/result`. Deterministic for the same
 inputs and `seed` on the same hardware.
 
-**Timing:** each request is its own one-shot GPU job that loads about 31 GB of weights first, so it takes
-minutes, not seconds, even in `fast` mode. No live progress (`progress` is always null).
+**Timing:** requests are run by long-lived GPU jobs, one per GPU, that load about 31 GB of weights once and then
+run requests one after another. A request that has to start one takes minutes (about 5 minutes to load, plus a slower
+first image), even in `fast` mode; a request that finds one already loaded and free starts at once and takes about
+the generation time (tens of seconds to a couple of minutes, more for edits with many references). Up to 8 run at
+once (operator setting `QWEN_IMAGE21_MAX_WORKERS`), so with many requests at once some wait `queued` for a free one;
+a GPU job with nothing to do for 10 minutes is stopped (`QWEN_IMAGE21_IDLE_MINUTES`). `fast` and `quality` use
+different checkpoints and so different GPU jobs. Cancelling a request that is already running stops its GPU job, so
+the next request starts cold. No live progress (`progress` is always null).
 
 **License:** Qwen-Image-2.1 is under the **Qwen Research License -- non-commercial use only**. Commercial use
 needs a separate agreement with the model's authors. Whoever operates this deployment is responsible for how it

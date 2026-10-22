@@ -163,7 +163,28 @@ Slurm job (N GPUs)  ->  run_h3.py (rank 0, g0: generation)
   (about 103k video tokens) ran out of memory in the first denoising step. `split_transformer` in `run_h3.py` moves blocks 25-49
   of the 50 onto the conditioning GPU once the encoder has exited, so each GPU holds about 31 GiB of weights and the blocks run
   one after another. Hooks carry the inputs of block 25 to the second GPU and the output of block 49 back.
-- A job is a cold start every time, like every other backend here: nothing stays loaded.
+- **Warm workers.** A request does not get a Slurm job of its own. The gateway keeps up to `H3_MAX_WORKERS` (default 8)
+  long-lived Slurm jobs of 4 or 8 GPUs (`models/h3/runner/worker.py`, started and fed by `gateway/common/worker_pool.py`, the
+  pool Qwen-Image-2.1 uses too). A worker holds its allocation and, for each request, runs the same `run_h3.py` command a
+  cold job would run, so the runner is unchanged and **nothing stays loaded in a process**. What a second request saves is the
+  reading: the checkpoints the first one read are in the node's page cache, so loading takes seconds. Measured with a tiny
+  `t2va` request (22 frames, 256x448, 4 steps, 4 GPUs) run twice in one allocation: transformer load 263.8 s -> 12.5 s, encoder
+  load 308.2 s -> 11.6 s, whole run 440.7 s -> 76.5 s. Through the gateway (two cold workers started together on one node,
+  then a third request): 590 s and 621 s cold, 92 s warm. About 33 s of the remaining time is `transformer_to_host` and about
+  10 s the NCCL group set-up, both of which a persistent process could remove; that was not built, because the page cache
+  alone gets most of the saving and leaves `run_h3.py` untouched.
+  - Workers are separate per transformer checkpoint (`transformer` for `t2va` and `fl2va`, `transformer_ref` for `ref2va`) and
+    per GPU count. A worker serving a checkpoint is kept in the pool for `H3_IDLE_MINUTES` (default 10) after its last
+    request; at the cap, the longest-idle worker is stopped to make room for one of another kind. A worker is also replaced
+    before its own Slurm time (`H3_WORKER_TIME`, 12 h) cannot fit another request.
+  - A request that fails ends its worker (the next one gets a fresh one). Cancelling a running request stops its whole worker,
+    since the run is several processes on every GPU of the allocation. A request that runs past its time limit (the sizer's
+    `--time`) is stopped the same way and fails with a message saying so.
+  - The page-cache saving depends on the node keeping the files cached; it is a property of the node's memory, not something the
+    worker enforces, so a busy node may evict them and a "warm" request be slower than the figures above.
+  - `estimated_run_seconds` still includes the 330 s load, so a warm request finishes well inside it.
+  - The usage log (below) records a pooled request with `worker_id` and `warm`; its `slurm.elapsed_s` is the request's own run
+    time and `slurm.max_rss_gib` is null (sacct's figures would be the worker's).
 
 ## Sizing: how many GPUs, and the estimate
 
@@ -208,7 +229,8 @@ Whenever an H3 job finishes, the gateway's poller appends one JSON line to **`$V
 (`gateway/services/h3/usage_log.py`). A line holds: the job's outcome, GPUs, estimate, queue wait and run time; `sizing.json`; the runner's
 `metrics.<role>.json` files (`run`, `condition`, `worker<r>`: stage timings, peak GPU memory per GPU, the encoder's actual token
 count, the packed sequence's actual length, and for a failure the stage and the out-of-memory sizes parsed from the error); and one
-`sacct` call (state, node, elapsed seconds, peak host RAM). **Never the prompt, file names, asset ids or error messages** (only an error's type and the out-of-memory sizes in it). A job sent with
+`sacct` call (state, node, elapsed seconds, peak host RAM; for a request run by a warm worker the request's own run time and node,
+without the RAM figure, plus `worker_id` and `warm`). **Never the prompt, file names, asset ids or error messages** (only an error's type and the out-of-memory sizes in it). A job sent with
 `incognito: true` is recorded the same way with its job id left out. The log lives outside `jobs/`, so retention does not delete it, and
 `purge_all_data.sh` leaves `metrics/` alone.
 
@@ -241,7 +263,9 @@ and writes the MP4). The upstream code is not vendored: it is the installed diff
 Operator settings (environment variables of the gateway process, see `gateway/run.sh` and `vision.env.example`; all are read when the
 gateway starts): `H3_MODEL_DIR`; `H3_GPU_OPTIONS` (`4,8`; `4` pins every job to four GPUs); `H3_ROWS_PER_GPU` (40000) and
 `H3_MAX_ENCODER_TOKENS` (60000), the limits a request is sized against; `H3_MEM` (256G for the whole job), `H3_CPUS_PER_GPU` (8) and
-`H3_API_TIME` (01:30:00, also the longest estimate a request may have); and `H3_ATTENTION_BACKEND` (`_flash_3_hub` when started with
+`H3_API_TIME` (01:30:00, also the longest estimate a request may have); `H3_MAX_WORKERS` (8), `H3_IDLE_MINUTES` (10) and
+`H3_WORKER_TIME` (12:00:00, must exceed `H3_API_TIME`), the warm workers described above (`gateway/run.sh` passes these
+three on to the gateway); and `H3_ATTENTION_BACKEND` (`_flash_3_hub` when started with
 `gateway/run.sh`). There is no `H3_PARALLELISM` any more: jobs always use `ulysses`. The gateway environment now also needs Pillow and
 PyAV (`gateway/requirements.lock.txt`, the same pins as the `h3` environment) to read the uploaded files' headers.
 

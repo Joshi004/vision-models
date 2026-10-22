@@ -78,7 +78,7 @@ DEFAULT_MAX_TOKENS = 4096
 # Total characters over all messages. A rough guard that keeps an ordinary
 # prompt plus its answer inside MAX_MODEL_LEN; vLLM's own exact check still
 # applies and its message is passed back to the client.
-MAX_PROMPT_CHARS = 32000
+MAX_PROMPT_CHARS = 45000
 MAX_SCHEMA_BYTES = 64 * 1024
 
 # Warm-server estimate shown until real jobs exist (replaced by the median of

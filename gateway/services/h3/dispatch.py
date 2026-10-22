@@ -1,12 +1,16 @@
-"""Builds the MiniMax H3 invocation and submits it as a Slurm job.
+"""Builds the MiniMax H3 invocation and queues it for a warm worker.
 
-Same shape as services/ltx25/dispatch.py: build the argv for one
-`models/h3/runner/run_h3.py` run, then submit it non-blocking via sbatch -- see
-common/run_pipeline_job.py for what actually executes on the compute node.
+Like services/ltx25/dispatch.py this builds the argv for one `models/h3/runner/run_h3.py`
+run, but a request has no Slurm job of its own: up to config.MAX_WORKERS long-lived worker
+jobs (models/h3/runner/worker.py) each hold 4 or 8 GPUs and run queued requests one after
+another, so only a worker's first request reads the checkpoints from shared storage.
+common/worker_pool.py starts, feeds and stops them; this module writes the job's files
+(args.json, output_path.txt: the partial-path-rename convention of common/run_pipeline_job.py,
+which models/common/pool_worker.py follows) and queues the request.
 Differences from the LTX backends:
 
-  * The job holds 4 or 8 GPUs on one node (`--gres=gpu:N`): services/h3/sizing.py picks N
-    for each request before anything is submitted, and a request that does not fit is
+  * A worker holds 4 or 8 GPUs on one node (`--gres=gpu:N`): services/h3/sizing.py picks N
+    for each request before anything is queued, and a request that does not fit is
     refused (SizingError). run_h3.py splits the text/vision encoder over two of them,
     then ALL N denoise together in ulysses mode.
   * The wrapper script, not a library module, is the entry point, so every
@@ -22,12 +26,12 @@ from __future__ import annotations
 
 import json
 import shlex
-import subprocess
 from pathlib import Path
 
 from common import config as common_config
-from common import job_store, retention, storage
+from common import job_store, storage
 from common.slurm import resolve_partition
+from common.worker_pool import PoolError, PoolRequest, WorkerPool
 from services.h3 import config, sizing, video_shape
 from services.h3.schemas import H3AudioToVideoRequest, H3GenerateRequest
 
@@ -53,8 +57,8 @@ def _check_capacity() -> None:
 # ---------------------------------------------------------------------------
 # Per-recipe argv builders. Each returns the args *after* the interpreter (i.e.
 # starting with the run_h3.py script path), with --output-path already set to
-# `output_path` (_submit_slurm_job rewrites it to a partial path before
-# actually submitting), together with the sizing decision made for the request.
+# `output_path` (_write_job_files rewrites it to a partial path before the
+# request is queued), together with the sizing decision made for the request.
 # ---------------------------------------------------------------------------
 
 
@@ -149,21 +153,9 @@ def build_audio_to_video_args(
 # ---------------------------------------------------------------------------
 
 
-def _slurm_time(seconds: int) -> str:
-    return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
-
-
-def _submit_slurm_job(
-    job_id: str,
-    job_dir: Path,
-    module_args: list[str],
-    output_path: Path,
-    partition: str,
-    incognito: bool,
-    sized: sizing.Sizing,
-) -> str:
-    """Write args.json + submit via sbatch (non-blocking). Returns the Slurm job id.
-    The allocation (GPUs, CPUs, time limit) follows the sizing of this request."""
+def _write_job_files(job_dir: Path, module_args: list[str], output_path: Path) -> None:
+    """args.json (the full argv of a cold run of run_h3.py, with --output-path rewritten to the partial
+    file) and output_path.txt (the final path), read by the worker."""
     partial_path = job_dir / f"output.partial{output_path.suffix}"
     args = list(module_args)
     args[args.index("--output-path") + 1] = str(partial_path)
@@ -172,30 +164,52 @@ def _submit_slurm_job(
     (job_dir / "args.json").write_text(json.dumps(full_argv))
     (job_dir / "output_path.txt").write_text(str(output_path))
 
-    wrap_argv = ["python3", str(config.RUN_PIPELINE_JOB_SCRIPT), str(job_dir)]
-    wrap_str = "HF_HUB_OFFLINE=1 " + shlex.join(wrap_argv)
-    sbatch_cmd = [
+
+def _worker_key(module_args: list[str], gpus: int) -> str:
+    """Which warm workers can serve a request: the same transformer checkpoint (so the worker's page
+    cache holds it) and the same number of GPUs."""
+    workflow = module_args[module_args.index("--workflow") + 1]
+    checkpoint = "transformer_ref" if workflow == "ref2va" else "transformer"
+    return f"{checkpoint}:{gpus}gpu"
+
+
+def _worker_sbatch_command(worker_id: str, worker_dir: Path, key: str, partition: str, gpus: int) -> list[str]:
+    """The sbatch command for one warm worker, holding `gpus` GPUs on one node."""
+    worker_argv = [
+        "python3",
+        str(config.WORKER_SCRIPT),
+        "--worker-dir", str(worker_dir),
+        # A safety net only: the gateway stops an idle worker after IDLE_MINUTES.
+        "--idle-exit-seconds", str(int(config.IDLE_MINUTES * 60 * 2)),
+    ]
+    return [
         "sbatch",
         "--parsable",
         f"--partition={partition}",
         "--nodes=1",
-        f"--gres=gpu:{sized.gpus}",
-        f"--cpus-per-task={config.CPUS_PER_GPU * sized.gpus}",
+        f"--gres=gpu:{gpus}",
+        f"--cpus-per-task={config.CPUS_PER_GPU * gpus}",
         f"--mem={config.MEM}",
-        f"--time={_slurm_time(sized.time_limit_seconds)}",
-        f"--job-name={common_config.SLURM_JOB_NAME_PREFIX}h3-api-{job_id[:8]}",
-        f"--output={retention.slurm_log_path(job_dir, incognito)}",
-        f"--wrap={wrap_str}",
+        f"--time={config.WORKER_TIME_LIMIT}",
+        f"--job-name={common_config.SLURM_JOB_NAME_PREFIX}h3-worker-{worker_id[:8]}",
+        f"--output={worker_dir / 'worker.log'}",
+        f"--wrap=HF_HUB_OFFLINE=1 {shlex.join(worker_argv)}",
     ]
-    result = subprocess.run(sbatch_cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise DispatchError(f"sbatch failed: {result.stderr.strip() or result.stdout.strip()}")
-    return result.stdout.strip().split(";")[0]  # --parsable prints "<id>" or "<id>;<cluster>"
+
+
+pool = WorkerPool(
+    "h3",
+    pipelines=("h3:generate", "h3:audio-to-video"),
+    max_workers=config.MAX_WORKERS,
+    idle_seconds=config.IDLE_MINUTES * 60,
+    worker_time_seconds=config.worker_time_limit_seconds(),
+    build_sbatch_command=_worker_sbatch_command,
+)
 
 
 def _dispatch(pipeline: str, req, build_args) -> tuple[str, sizing.Sizing]:
     """Shared submit path: validate capacity + assets + size, then create the job
-    directory/DB row/Slurm job, in that order, so an invalid request never
+    directory/DB row and queue the request, in that order, so an invalid request never
     leaves debris behind. Returns the job id and the sizing decision."""
     _check_capacity()
     partition = resolve_partition(getattr(req, "partition", None))
@@ -221,11 +235,20 @@ def _dispatch(pipeline: str, req, build_args) -> tuple[str, sizing.Sizing]:
         estimated_run_seconds=sized.estimated_run_seconds,
     )
     try:
-        slurm_job_id = _submit_slurm_job(job_id, job_dir, module_args, output_path, partition, req.incognito, sized)
-    except DispatchError:
-        job_store.mark_failed(job_id, "Could not submit the Slurm job.")
-        raise
-    job_store.set_slurm_job_id(job_id, slurm_job_id)
+        _write_job_files(job_dir, module_args, output_path)
+        pool.enqueue(
+            PoolRequest(
+                job_id=job_id,
+                key=_worker_key(module_args, sized.gpus),
+                partition=partition,
+                gpus=sized.gpus,
+                limit_seconds=sized.time_limit_seconds,
+            ),
+            job_dir,
+        )
+    except (OSError, PoolError) as e:
+        job_store.mark_failed(job_id, "Could not queue the request.")
+        raise DispatchError(str(e)) from e
     return job_id, sized
 
 

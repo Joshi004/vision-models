@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 
 from common import config as common_config
+from common.slurm import slurm_time_seconds
 
 # ---------------------------------------------------------------------------
 # Project layout. H3 runs through diffusers' own MiniMax-H3 modular pipeline
@@ -37,6 +38,7 @@ RUN_H3_SCRIPT = H3_PROJECT_ROOT / "runner" / "run_h3.py"
 MODEL_DIR = Path(os.environ.get("H3_MODEL_DIR", str(common_config.WEIGHTS_DIR / "h3" / "MiniMax-H3")))
 
 RUN_PIPELINE_JOB_SCRIPT = common_config.MODEL_API_DIR / "common" / "run_pipeline_job.py"
+WORKER_SCRIPT = H3_PROJECT_ROOT / "runner" / "worker.py"
 
 # ---------------------------------------------------------------------------
 # Video shape. Fixed by the released model (diffusers' MiniMax-H3 docs): 24 fps;
@@ -100,6 +102,24 @@ MEM = os.environ.get("H3_MEM", "256G")
 CPUS_PER_GPU = int(os.environ.get("H3_CPUS_PER_GPU", "8"))
 # The longest a job may be given, and so the longest estimate a request may have. Slurm's HH:MM:SS.
 JOB_TIME_LIMIT = os.environ.get("H3_API_TIME", "01:30:00")
+
+# ---------------------------------------------------------------------------
+# Warm workers (see common/worker_pool.py). A request is not given a Slurm job of
+# its own: up to MAX_WORKERS long-lived jobs (4 or 8 GPUs each, as sized) each run
+# queued requests one after another (models/h3/runner/worker.py). Only the first
+# request on a worker pays for reading the checkpoints from shared storage; the
+# next ones find them in the node's page cache (about 6 minutes saved, see the
+# worker script). A worker with nothing to do for IDLE_MINUTES is stopped.
+# Workers are separate per transformer checkpoint (`transformer` for t2va and
+# fl2va, `transformer_ref` for ref2va) and per GPU count. Each request still has
+# its own time limit (the sizer's, at most JOB_TIME_LIMIT); WORKER_TIME_LIMIT is
+# the Slurm time limit of a worker and must be longer than that.
+# ---------------------------------------------------------------------------
+MAX_WORKERS = int(os.environ.get("H3_MAX_WORKERS", "8"))
+IDLE_MINUTES = float(os.environ.get("H3_IDLE_MINUTES", "10"))
+WORKER_TIME_LIMIT = os.environ.get("H3_WORKER_TIME", "12:00:00")
+if MAX_WORKERS < 1:
+    raise RuntimeError("H3_MAX_WORKERS must be 1 or more.")
 
 # Optional diffusers attention backend for the transformer, e.g. "_flash_3_hub"
 # (FlashAttention-3 on Hopper, roughly 2x faster than the default per measurements
@@ -175,3 +195,7 @@ def job_time_limit_seconds() -> int:
         raise RuntimeError(f"H3_API_TIME must look like HH:MM:SS, got {JOB_TIME_LIMIT!r}.")
     hours, minutes, seconds = (int(part) for part in parts)
     return hours * 3600 + minutes * 60 + seconds
+
+
+def worker_time_limit_seconds() -> int:
+    return slurm_time_seconds(WORKER_TIME_LIMIT, "H3_WORKER_TIME")
