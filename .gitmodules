@@ -22,3 +22,15 @@
 	path = third_party/TBDub
 	url = https://github.com/TaoLiveAIGC/TBDub.git
 	ignore = untracked
+[submodule "third_party/ACE-Step-1.5"]
+	path = third_party/ACE-Step-1.5
+	url = https://github.com/ACE-Step/ACE-Step-1.5.git
+[submodule "third_party/stable-audio-tools"]
+	path = third_party/stable-audio-tools
+	url = https://github.com/Stability-AI/stable-audio-tools.git
+[submodule "third_party/stable-audio-3"]
+	path = third_party/stable-audio-3
+	url = https://github.com/Stability-AI/stable-audio-3.git
+[submodule "third_party/YuE"]
+	path = third_party/YuE
+	url = https://github.com/multimodal-art-projection/YuE.git
