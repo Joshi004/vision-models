@@ -97,7 +97,8 @@ Nothing here is instant — every request is a real GPU job, so it always takes 
 Every one of the "Yes" rows above is also reachable through **a web UI at `/ui/`** — plain forms instead of hand-written HTTP requests, backed by this exact same API (§1's diagram still applies underneath: it's still a real GPU job either way, still takes minutes at minimum). MAGI-2.2 and Qwen3-VL have no UI tab either, for the same reason they have no endpoint yet.
 
 Plus, no matter which service you're calling (or whether you're using the UI or calling the API directly), everyone shares:
-- `POST /v1/uploads` — upload a file once, get an ID back to reference it later.
+- `POST /v1/uploads` — upload a file once, get an ID back to reference it later (the reply includes the file's size and SHA-256 so you can confirm it arrived intact).
+- `POST /v1/uploads/by-hash` — send a file's SHA-256 first: if the server already has that file you get its ID back and skip the upload; if not (never uploaded, purged or expired) you get a 404 and upload it as usual.
 - `GET /v1/jobs` — list the most recent jobs across every backend (new — added for the web UI's jobs list, but usable directly too).
 - `GET /v1/jobs/{id}` — check a job's status.
 - `GET /v1/jobs/{id}/result` — download the finished file.

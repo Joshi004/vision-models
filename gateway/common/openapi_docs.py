@@ -144,13 +144,43 @@ Upload a single file (image, audio, or video) and get back an `asset_id` to
 reference from any generation request (on any backend) that needs it. One
 file per call.
 
-Limit: {guide.STATIC_FACTS['upload_mb']} MB. {guide.STATIC_FACTS['upload_retention_text']} Re-uploading
-the same file again produces a new, additional `asset_id`, but a backend that recognises repeated requests (see
-"Sending the same request again" in its section of the guide) compares the file's content, not the `asset_id`.
+Limit: {guide.STATIC_FACTS['upload_mb']} MB. A file whose `Content-Length` is already over the limit is
+refused with 413 before it is sent; a request without `Content-Length` is stopped as soon as it passes the
+limit. {guide.STATIC_FACTS['upload_retention_text']} Re-uploading the same file again produces a new,
+additional `asset_id` (to avoid sending a file the server already has, ask `POST /v1/uploads/by-hash` first),
+but a backend that recognises repeated requests (see "Sending the same request again" in its section of the
+guide) compares the file's content, not the `asset_id`.
+
+**Confirming what arrived:** the response carries `size_bytes` and `sha256` of the file as the server stored
+it. Compare both with your own; if either differs, the upload was damaged -- send it again. The server
+acknowledges only once the whole file has been received: there is no per-chunk acknowledgement and no way to
+resume a partly sent upload, so an interrupted upload starts again from the beginning.
 
 Image format note: images are decoded and forced to RGB (the first 3 channels of
 whatever `PIL.Image.open()` returns) -- plain grayscale or palette-mode images
 may not convert as expected. Standard RGB JPEG/PNG images work reliably.
+"""
+
+UPLOAD_BY_HASH = f"""
+Ask whether the server already holds a file, by its SHA-256, instead of sending it again. Optional: a client
+that never calls this just uploads with `POST /v1/uploads` as usual.
+
+Send `{{"sha256": "<64 hex characters>"}}` (compute it over the exact bytes you would upload, e.g. `sha256sum
+file`). Two outcomes:
+
+- **200** -- the file is stored. The body is the same as an upload's, with the **existing** `asset_id` and
+  `reused: true`. Use that `asset_id` in a generation request; nothing was uploaded.
+- **404** -- the server has no usable copy: it was never uploaded, or was deleted, purged or has expired
+  ({guide.STATIC_FACTS['upload_retention_text']}). Upload the file with `POST /v1/uploads` and use the
+  `asset_id` that returns.
+
+The `asset_id` is shared with whoever uploaded the file first, so it can still disappear before you use it
+(for example when that job is purged). A generation request that then reports an unknown `asset_id` (400) is
+handled the same way: upload the file and retry. A successful call also restarts the unused-upload timer for
+that file. Files used by an `incognito` job are never offered.
+
+Anyone who has a file can learn through this endpoint whether the server holds a copy of it. This API has no
+authentication, so treat the existence of an upload as visible to every client of this server.
 """
 
 PARTITIONS = f"""
@@ -410,13 +440,32 @@ SUBMIT_RESPONSES = {
 
 UPLOAD_RESPONSES = {
     413: {
-        "description": f"File exceeds the {config.MAX_UPLOAD_BYTES} byte limit.",
+        "description": (
+            f"File exceeds the {config.MAX_UPLOAD_BYTES} byte limit. Sent at once, before the file is "
+            "transferred, when the request's `Content-Length` already shows it is too large; without a "
+            "`Content-Length` it is sent as soon as the transfer passes the limit."
+        ),
         "content": {
             "application/json": {
                 "example": {"detail": f"File exceeds the {config.MAX_UPLOAD_BYTES} byte limit."}
             }
         },
     },
+}
+
+UPLOAD_BY_HASH_RESPONSES = {
+    404: {
+        "description": "The server has no usable copy of this file. Upload it with `POST /v1/uploads`.",
+        "content": {
+            "application/json": {
+                "example": {
+                    "detail": "No stored upload has this sha256 (it was never uploaded, or was deleted, purged or "
+                    "expired). Upload the file with POST /v1/uploads."
+                }
+            }
+        },
+    },
+    422: {"description": "`sha256` is not 64 hexadecimal characters."},
 }
 
 JOB_LIST_RESPONSES: dict[int, dict] = {}

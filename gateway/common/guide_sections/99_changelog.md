@@ -4,6 +4,14 @@ Dates are when a change shipped on this codebase, not necessarily when you're re
 `api_version` field (`GET /v1/guide?format=json`) is this server's own current version; compare it
 against what you last integrated against.
 
+- **0.22.0** (2026-11-01): **Upload confirmation and "skip re-uploading".** `POST /v1/uploads` now answers with the
+  file's `sha256` (and `reused: false`) next to `size_bytes`, so you can confirm the whole file arrived intact. New
+  endpoint `POST /v1/uploads/by-hash` (`{"sha256": "..."}`): 200 returns the `asset_id` of a copy the server already
+  holds (`reused: true`, nothing to upload), 404 says it has none (never uploaded, or deleted, purged or expired), and
+  you then upload the file as usual. There is still no resuming of a partly sent upload. Behaviour changes: an upload
+  whose `Content-Length` is over the limit is refused with 413 before it is sent (and one without it as soon as it
+  passes the limit), uploads no longer pass through the server's memory, and an `incognito` job no longer deletes an
+  uploaded input that a queued, running or kept (non-incognito) job also uses. Otherwise additive.
 - **0.21.0** (2026-11-01): **GPU capacity limits that the operator changes while the service runs.** A global GPU
   limit and a limit on concurrent jobs per model (for a model served by warm workers, also its most warm workers) are
   now set on a "GPU capacity" page and no longer by environment variables (`MODEL_API_MAX_INFLIGHT` and the

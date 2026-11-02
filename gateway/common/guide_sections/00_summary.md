@@ -15,7 +15,10 @@ when you upgrade your integration, rather than keeping a saved copy of this text
 ### Core workflow, in short
 
 1. **Upload any file inputs first**, one at a time: `POST /v1/uploads`. Each call returns an
-   `asset_id`; reference that `asset_id` from the generation request that needs it.
+   `asset_id`; reference that `asset_id` from the generation request that needs it. The response also
+   carries the file's `size_bytes` and `sha256` -- compare them with your own to confirm it arrived
+   intact. Optionally, ask `POST /v1/uploads/by-hash` with the file's SHA-256 first: a 200 gives you the
+   `asset_id` of a copy the server already has (no upload needed), a 404 means upload the file as usual.
 2. **Submit a generation request** under the backend's own prefix. Every generation endpoint on
    every backend returns immediately with a `job_id` and `status: "queued"` -- it does **not** wait
    for the result to finish.

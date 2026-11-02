@@ -96,12 +96,14 @@ def _static_facts() -> dict[str, str]:
         "data is deleted an incognito job keeps only a minimal record (status, pipeline, timings; `request` is "
         "`{}`; a failed one keeps a one-line `error`). Jobs report `incognito` in `GET /v1/jobs/{job_id}`. "
         f"An uploaded file that no job references is deleted {config.UNUSED_UPLOAD_TTL_MINUTES:g} minute(s) "
-        "after upload."
+        "after upload (or after it was last handed out by `POST /v1/uploads/by-hash`)."
     )
     upload_retention_text = (
         "An uploaded file is kept for as long as a job references it, and is deleted when that job is purged "
-        "or expires; with `incognito: true` it is deleted as soon as that job ends. A file no job references "
-        f"is deleted {config.UNUSED_UPLOAD_TTL_MINUTES:g} minute(s) after upload."
+        "or expires; with `incognito: true` it is deleted as soon as that job ends, unless another job that is "
+        "still running or is kept in full uses the same file. A file no job references "
+        f"is deleted {config.UNUSED_UPLOAD_TTL_MINUTES:g} minute(s) after upload (or after it was last handed out "
+        "by `POST /v1/uploads/by-hash`, which never offers a file an incognito job uses)."
     )
     return {
         "upload_mb": str(upload_mb),

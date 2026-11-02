@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class PartitionOptionMixin(BaseModel):
@@ -173,6 +173,40 @@ class UploadResponse(BaseModel):
     asset_id: str = Field(..., description="Opaque id to reference this file from a generation request.", examples=["3f2a9c1e4b7d4a6c9e8f1a2b3c4d5e6f"])
     filename: str = Field(..., description="Original filename as sent by the client (for your own reference only).", examples=["reference_photo.jpg"])
     size_bytes: int = Field(..., description="Size of the uploaded file in bytes.", examples=[184320])
+    sha256: str = Field(
+        ...,
+        description=(
+            "Lowercase hex SHA-256 of the file as the server stored it. Compare it (and `size_bytes`) with your own "
+            "to confirm the whole file arrived intact; also usable with POST /v1/uploads/by-hash next time."
+        ),
+        examples=["9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"],
+    )
+    reused: bool = Field(
+        False,
+        description=(
+            "True only in a POST /v1/uploads/by-hash answer: the file was already stored, this is its existing "
+            "asset_id, and nothing was uploaded. Always false from POST /v1/uploads."
+        ),
+        examples=[False],
+    )
+
+
+class UploadByHashRequest(BaseModel):
+    """Request body of POST /v1/uploads/by-hash."""
+
+    sha256: str = Field(
+        ...,
+        description="Lowercase or uppercase hex SHA-256 (64 characters) of the file you would otherwise upload.",
+        examples=["9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"],
+    )
+
+    @field_validator("sha256")
+    @classmethod
+    def _valid_sha256(cls, value: str) -> str:
+        value = value.strip().lower()
+        if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+            raise ValueError("sha256 must be 64 hexadecimal characters.")
+        return value
 
 
 class JobSubmitResponse(BaseModel):

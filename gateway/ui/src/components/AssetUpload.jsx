@@ -13,7 +13,10 @@ import { UploadIcon, XIcon } from './icons.jsx';
 // server.py):
 //   null                                                     nothing chosen
 //   { status: 'uploading', filename, sentBytes, totalBytes }  sending
-//   { status: 'ready', assetId, filename, sizeBytes }         done
+//   { status: 'ready', assetId, filename, sizeBytes, sha256 } done (sha256 is
+//                                                             the server's hash of the stored
+//                                                             file; absent in drafts saved
+//                                                             before it existed)
 // Forms use this shape directly to compute their own submit blockers --
 // see utils.js's assetBlocker -- instead of re-deriving "is it still
 // uploading?" from scratch. This exact shape is also what gets persisted
@@ -90,7 +93,13 @@ export default function AssetUpload({ model, field, label, accept, value, onChan
       const result = await uploadFile(file, (sentBytes, totalBytes) => {
         onChange({ status: 'uploading', filename: file.name, sentBytes, totalBytes });
       });
-      onChange({ status: 'ready', assetId: result.asset_id, filename: result.filename, sizeBytes: result.size_bytes });
+      onChange({
+        status: 'ready',
+        assetId: result.asset_id,
+        filename: result.filename,
+        sizeBytes: result.size_bytes,
+        sha256: result.sha256,
+      });
     } catch (err) {
       setError(err.message);
       onChange(null);
@@ -271,6 +280,11 @@ export default function AssetUpload({ model, field, label, accept, value, onChan
           {ready && !value.reused && (
             <p className="truncate text-text">
               {value.filename} <span className="text-muted">({formatBytes(value.sizeBytes)})</span>
+              {value.sha256 && (
+                <span className="ml-2 font-mono text-xs text-muted" title={`SHA-256: ${value.sha256}`}>
+                  sha256 {value.sha256.slice(0, 8)}&hellip;
+                </span>
+              )}
             </p>
           )}
         </div>

@@ -13,7 +13,7 @@ column) gets these rules instead:
     reader and the failure reason need it -- and is deleted when the job ends.
   * When a job succeeds, everything in its folder except the output file is
     deleted, and so are its uploaded inputs (unless another queued/running
-    job still references them).
+    job, or a kept non-incognito job, still references them).
   * When a job fails or is cancelled, its folder and inputs are deleted; only
     a one-line error is kept.
   * When a result has been downloaded completely (server.py's job_result), the
@@ -87,10 +87,13 @@ def _remove(path: Path) -> None:
 
 
 def _delete_unreferenced_inputs(row) -> None:
-    """Delete this job's uploaded inputs, except any that another queued or
-    running job still needs."""
+    """Delete this job's uploaded inputs, except any that another job still
+    needs: a queued or running one, or a kept (non-incognito) one. An upload
+    can be shared between jobs (POST /v1/uploads/by-hash hands out the same
+    asset_id again), so an incognito job must not delete a file a kept job
+    still references."""
     for asset_id in sorted(purge.asset_ids_in(json.loads(row["request_json"]))):
-        if not job_store.asset_in_flight(asset_id):
+        if not job_store.asset_needed_by_other_job(asset_id):
             storage.delete_upload(asset_id)
 
 

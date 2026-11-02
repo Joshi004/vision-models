@@ -63,6 +63,7 @@ from common.schemas import (
     PartitionStatus,
     PartitionStatusResponse,
     PurgeResponse,
+    UploadByHashRequest,
     UploadResponse,
 )
 from common.one_time_file_response import OneTimeFileResponse
@@ -135,11 +136,41 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="GPU Cluster Model-Serving API",
-    version="0.21.0",
+    version="0.22.0",
     description=openapi_docs.APP_DESCRIPTION,
     openapi_tags=openapi_docs.TAGS_METADATA,
     lifespan=lifespan,
 )
+
+
+class UploadSizeGuard:
+    """Answers 413 to a POST /v1/uploads whose declared Content-Length is already over the limit,
+    before any of the body is read, so an oversized file is refused at once instead of after
+    being sent in full. A request with no Content-Length is still stopped part-way by
+    storage.save_upload_stream. Plain ASGI (not BaseHTTPMiddleware) so it cannot interfere with
+    streamed responses such as OneTimeFileResponse."""
+
+    # Room for the multipart framing around the file itself.
+    _MULTIPART_SLACK_BYTES = 1024 * 1024
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["method"] == "POST" and scope["path"] == "/v1/uploads":
+            declared = dict(scope["headers"]).get(b"content-length", b"")
+            if declared.isdigit() and int(declared) > config.MAX_UPLOAD_BYTES + self._MULTIPART_SLACK_BYTES:
+                response = JSONResponse(
+                    {"detail": f"File exceeds the {config.MAX_UPLOAD_BYTES} byte limit."},
+                    status_code=413,
+                    headers={"Connection": "close"},
+                )
+                await response(scope, receive, send)
+                return
+        await self.inner(scope, receive, send)
+
+
+app.add_middleware(UploadSizeGuard)
 
 # Backend routers, each namespaced under its own prefix. Add future backends
 # (e.g. MAGI-2.2, Wan-Animate v2) the same way once their own
@@ -296,14 +327,45 @@ def put_capacity(body: CapacityUpdateRequest) -> CapacityResponse:
     response_model=UploadResponse,
     responses=openapi_docs.UPLOAD_RESPONSES,
 )
-async def upload(
+def upload(
     file: Annotated[UploadFile, File(description="The image, audio, or video file to upload.")],
 ) -> UploadResponse:
-    data = await file.read()
-    if len(data) > config.MAX_UPLOAD_BYTES:
-        raise HTTPException(413, f"File exceeds the {config.MAX_UPLOAD_BYTES} byte limit.")
-    asset_id, _path = storage.save_upload_bytes(file.filename or "upload", data)
-    return UploadResponse(asset_id=asset_id, filename=file.filename or "upload", size_bytes=len(data))
+    # A plain `def`: FastAPI runs it in a worker thread, so copying a large file to the
+    # (network) filesystem does not block the event loop.
+    try:
+        asset_id, _path, size_bytes, sha256 = storage.save_upload_stream(
+            file.filename or "upload", file.file, config.MAX_UPLOAD_BYTES
+        )
+    except storage.UploadTooLarge:
+        raise HTTPException(413, f"File exceeds the {config.MAX_UPLOAD_BYTES} byte limit.") from None
+    return UploadResponse(
+        asset_id=asset_id, filename=file.filename or "upload", size_bytes=size_bytes, sha256=sha256
+    )
+
+
+@app.post(
+    "/v1/uploads/by-hash",
+    tags=["Uploads"],
+    summary="Reuse a file the server already has, by its SHA-256",
+    description=openapi_docs.UPLOAD_BY_HASH,
+    response_model=UploadResponse,
+    responses=openapi_docs.UPLOAD_BY_HASH_RESPONSES,
+)
+def upload_by_hash(body: UploadByHashRequest) -> UploadResponse:
+    row = storage.find_reusable_upload(body.sha256)
+    if row is None:
+        raise HTTPException(
+            404,
+            "No stored upload has this sha256 (it was never uploaded, or was deleted, purged or expired). "
+            "Upload the file with POST /v1/uploads.",
+        )
+    return UploadResponse(
+        asset_id=row["asset_id"],
+        filename=row["filename"],
+        size_bytes=row["size_bytes"],
+        sha256=row["sha256"],
+        reused=True,
+    )
 
 
 _JOB_ID_PARAM = Annotated[

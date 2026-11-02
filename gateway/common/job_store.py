@@ -117,6 +117,8 @@ def init_db() -> None:
         upload_columns = {row["name"] for row in conn.execute("PRAGMA table_info(uploads)")}
         if "sha256" not in upload_columns:
             conn.execute("ALTER TABLE uploads ADD COLUMN sha256 TEXT")
+        # Looked up by POST /v1/uploads/by-hash.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_uploads_sha256 ON uploads(sha256)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_dedup_key ON jobs(dedup_key)")
 
@@ -398,6 +400,44 @@ def upload_sha256s(asset_ids: list[str]) -> dict[str, str | None]:
 def get_upload(asset_id: str) -> sqlite3.Row | None:
     with _connect() as conn:
         return conn.execute("SELECT * FROM uploads WHERE asset_id = ?", (asset_id,)).fetchone()
+
+
+def find_uploads_by_sha256(sha256: str) -> list[sqlite3.Row]:
+    """Every upload with this content hash, newest first."""
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT * FROM uploads WHERE sha256 = ? ORDER BY created_at DESC", (sha256,)
+        ).fetchall()
+
+
+def touch_upload(asset_id: str) -> None:
+    """Make the upload count as uploaded now, so the unused-upload sweep
+    (retention.sweep_unused_uploads) waits its full time again."""
+    with _connect() as conn:
+        conn.execute("UPDATE uploads SET created_at = ? WHERE asset_id = ?", (_now(), asset_id))
+
+
+def asset_used_by_incognito(asset_id: str) -> bool:
+    """True if any incognito job's stored request still references this asset_id (such an
+    upload is deleted when that job ends, so it must not be offered to anyone else)."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM jobs WHERE incognito = 1 AND instr(request_json, ?) > 0 LIMIT 1", (asset_id,)
+        ).fetchone()
+        return row is not None
+
+
+def asset_needed_by_other_job(asset_id: str) -> bool:
+    """True if a job still needs this upload: one that is queued or running (its GPU job may
+    still read the file), or one that is not incognito (kept in full, so Retry needs it).
+    Called while cleaning up a finished incognito job, which is neither."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM jobs WHERE instr(request_json, ?) > 0 "
+            "AND (status IN ('queued', 'running') OR incognito = 0) LIMIT 1",
+            (asset_id,),
+        ).fetchone()
+        return row is not None
 
 
 def asset_in_use(asset_id: str) -> bool:
