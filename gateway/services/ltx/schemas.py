@@ -26,7 +26,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from common.schemas import IncognitoOptionMixin, PartitionOptionMixin
+from common.schemas import IncognitoOptionMixin, PriorityOptionMixin, PartitionOptionMixin
 from services.ltx import config
 from services.tbdub.schemas import LIP_SYNC_FIELD_DESCRIPTION, apply_lip_sync_shape
 
@@ -134,7 +134,7 @@ class VideoShapeMixin(BaseModel):
         return self
 
 
-class TextToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin):
+class TextToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin, PriorityOptionMixin):
     """Request body for POST /v1/ltx/videos/generate -- text-to-video, or
     image-to-video when `images` is non-empty. See that endpoint's
     description for the fast-vs-quality tradeoff."""
@@ -192,7 +192,7 @@ class TextToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionM
     )
 
 
-class KeyframeInterpolationRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin):
+class KeyframeInterpolationRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin, PriorityOptionMixin):
     """Request body for POST /v1/ltx/videos/keyframe-interpolation.
 
     Quality recipe only -- no distilled/fast variant is wired up for this
@@ -220,7 +220,7 @@ class KeyframeInterpolationRequest(VideoShapeMixin, PartitionOptionMixin, Incogn
     )
 
 
-class AudioToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin):
+class AudioToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin, PriorityOptionMixin):
     """Request body for POST /v1/ltx/videos/audio-to-video.
 
     Quality recipe only -- same reason as keyframe interpolation."""
@@ -261,7 +261,7 @@ class AudioToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOption
         return self
 
 
-class RetakeRequest(PartitionOptionMixin, IncognitoOptionMixin):
+class RetakeRequest(PartitionOptionMixin, IncognitoOptionMixin, PriorityOptionMixin):
     """Request body for POST /v1/ltx/videos/retake.
 
     Distilled/fast checkpoint only -- that's the only variant the underlying
@@ -296,7 +296,7 @@ class RetakeRequest(PartitionOptionMixin, IncognitoOptionMixin):
         return self
 
 
-class TextToAudioRequest(PartitionOptionMixin, IncognitoOptionMixin):
+class TextToAudioRequest(PartitionOptionMixin, IncognitoOptionMixin, PriorityOptionMixin):
     """Request body for POST /v1/ltx/audio/generate -- audio only, no video.
 
     Dev checkpoint only -- that's the only variant the underlying

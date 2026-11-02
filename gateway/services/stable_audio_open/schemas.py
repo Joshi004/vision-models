@@ -10,11 +10,11 @@ from __future__ import annotations
 from pydantic import Field, model_validator
 
 from common.audio_inputs import ACCEPTED_AUDIO_FORMATS
-from common.schemas import IncognitoOptionMixin, PartitionOptionMixin
+from common.schemas import IncognitoOptionMixin, PriorityOptionMixin, PartitionOptionMixin
 from services.stable_audio_open import config
 
 
-class _AudioRequestBase(PartitionOptionMixin, IncognitoOptionMixin):
+class _AudioRequestBase(PartitionOptionMixin, IncognitoOptionMixin, PriorityOptionMixin):
     """Fields shared by generate and transform."""
 
     prompt: str = Field(

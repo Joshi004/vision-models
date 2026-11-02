@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from common.schemas import IncognitoOptionMixin, PartitionOptionMixin
+from common.schemas import IncognitoOptionMixin, PriorityOptionMixin, PartitionOptionMixin
 from services.yue2 import config
 
 _EXAMPLE_STYLE = (
@@ -22,7 +22,7 @@ _EXAMPLE_ABC = (
 _EXAMPLE_LYRICS = "[Verse]\nStreetlights hum along the avenue\nI keep your number in my shoe\n\n[Chorus]\nStay with me until the morning light\nHold the quiet of the night"
 
 
-class _SongRequestBase(PartitionOptionMixin, IncognitoOptionMixin):
+class _SongRequestBase(PartitionOptionMixin, IncognitoOptionMixin, PriorityOptionMixin):
     """Fields shared by generate and cover."""
 
     style: str = Field(

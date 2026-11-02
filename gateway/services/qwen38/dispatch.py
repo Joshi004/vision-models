@@ -20,6 +20,8 @@ again, from the request stored with the job, whatever a restart interrupted.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import itertools
 import json
 import logging
 import os
@@ -42,7 +44,7 @@ capacity.register("qwen38", "Qwen3.8 language model", capacity.FIXED, planning_g
 
 _tasks: dict[str, asyncio.Task] = {}
 _calls: dict[str, server_manager.ChatCall] = {}
-_semaphore: asyncio.Semaphore | None = None
+_gate: "_PriorityGate | None" = None
 _loop: asyncio.AbstractEventLoop | None = None
 
 # Pause before a request whose server was lost tries again, so the pool of attempts is not
@@ -58,6 +60,10 @@ class IdempotencyConflict(RuntimeError):
     """An Idempotency-Key that was already used for a different request."""
 
 
+def _without_priority(request: dict) -> dict:
+    return {key: value for key, value in request.items() if key != "priority"}
+
+
 def _check_capacity() -> None:
     if job_store.count_inflight_for((PIPELINE,)) >= common_config.MAX_QUEUED_PER_BACKEND:
         raise CapacityError(
@@ -66,11 +72,57 @@ def _check_capacity() -> None:
         )
 
 
-def _get_semaphore() -> asyncio.Semaphore:
-    global _semaphore
-    if _semaphore is None:
-        _semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_REQUESTS)
-    return _semaphore
+class _PriorityGate:
+    """Like an asyncio.Semaphore, except that when a slot frees up it goes to the most urgent waiting
+    request instead of the one that has waited longest. A waiting request's priority is read from the
+    job table at that moment, so a change made from the UI counts; requests of the same priority
+    are served in the order they arrived."""
+
+    def __init__(self, slots: int) -> None:
+        self._free = slots
+        self._arrivals = itertools.count()
+        self._waiters: list[tuple[int, str, asyncio.Future]] = []  # (arrival number, job_id, future)
+
+    @contextlib.asynccontextmanager
+    async def slot(self, job_id: str):
+        await self._acquire(job_id)
+        try:
+            yield
+        finally:
+            self._free += 1
+            self._wake()
+
+    async def _acquire(self, job_id: str) -> None:
+        if self._free > 0 and not self._waiters:
+            self._free -= 1
+            return
+        future = asyncio.get_running_loop().create_future()
+        waiter = (next(self._arrivals), job_id, future)
+        self._waiters.append(waiter)
+        try:
+            await future
+        except asyncio.CancelledError:
+            if future.done() and not future.cancelled():
+                self._free += 1  # the slot was already handed to this request: give it back
+                self._wake()
+            elif waiter in self._waiters:
+                self._waiters.remove(waiter)
+            raise
+
+    def _wake(self) -> None:
+        while self._free > 0 and self._waiters:
+            priorities = job_store.queued_priorities([job_id for _, job_id, _ in self._waiters])
+            waiter = min(self._waiters, key=lambda w: (priorities.get(w[1], job_store.DEFAULT_PRIORITY), w[0]))
+            self._waiters.remove(waiter)
+            self._free -= 1
+            waiter[2].set_result(None)
+
+
+def _get_gate() -> _PriorityGate:
+    global _gate
+    if _gate is None:
+        _gate = _PriorityGate(config.MAX_CONCURRENT_REQUESTS)
+    return _gate
 
 
 def build_payload(req: Qwen38GenerateRequest) -> dict:
@@ -145,7 +197,7 @@ async def _run(job_id: str, job_dir: Path, req: Qwen38GenerateRequest) -> None:
     try:
         # Waiting for a free slot comes first: only the few requests that hold one wait for the server
         # (which polls Slurm), however many more are queued behind them.
-        async with _get_semaphore():
+        async with _get_gate().slot(job_id):
             while True:
                 await asyncio.to_thread(server_manager.ensure_server)
                 await server_manager.wait_until_ready(config.STARTUP_TIMEOUT_SECONDS)
@@ -208,11 +260,13 @@ async def submit_generate(req: Qwen38GenerateRequest, client_key: str | None = N
     with dedup.lock:
         if dedup_key is not None:
             earlier_jobs = job_store.find_by_dedup_key(dedup_key)
-            if earlier_jobs and json.loads(earlier_jobs[0]["request_json"]) != body:
+            # `priority` is left out of the comparison: asking again with another priority is the
+            # same request (dedup.reuse then raises the earlier job's priority if it is more urgent).
+            if earlier_jobs and _without_priority(json.loads(earlier_jobs[0]["request_json"])) != _without_priority(body):
                 raise IdempotencyConflict("This Idempotency-Key was already used for a different request.")
             earlier = dedup.pick_reusable(earlier_jobs)
             if earlier is not None:
-                return dedup.reuse(earlier)
+                return dedup.reuse(earlier, req.priority)
         _check_capacity()
         job_dir.mkdir(parents=True)
         (job_dir / "output_path.txt").write_text(str(job_dir / "output.json"))

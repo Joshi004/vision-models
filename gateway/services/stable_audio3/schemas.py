@@ -10,7 +10,7 @@ from __future__ import annotations
 from pydantic import Field, model_validator
 
 from common.audio_inputs import ACCEPTED_AUDIO_FORMATS
-from common.schemas import IncognitoOptionMixin, PartitionOptionMixin
+from common.schemas import IncognitoOptionMixin, PriorityOptionMixin, PartitionOptionMixin
 from services.stable_audio3 import config
 
 _EXAMPLE_PROMPT = (
@@ -19,7 +19,7 @@ _EXAMPLE_PROMPT = (
 )
 
 
-class _AudioRequestBase(PartitionOptionMixin, IncognitoOptionMixin):
+class _AudioRequestBase(PartitionOptionMixin, IncognitoOptionMixin, PriorityOptionMixin):
     """Fields shared by generate, transform and inpaint."""
 
     prompt: str = Field(

@@ -11,6 +11,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from common import job_store
+
 
 class PartitionOptionMixin(BaseModel):
     """Adds an optional `partition` field to a generation request. Shared by
@@ -47,6 +49,39 @@ class IncognitoOptionMixin(BaseModel):
             "(DELETE /v1/jobs/{job_id}/purge) or `job_retention_days` pass (see GET /v1/health)."
         ),
         examples=[False],
+    )
+
+
+class PriorityOptionMixin(BaseModel):
+    """Adds an optional `priority` field to a generation request. Shared by every backend so
+    the field is accepted everywhere; see common/worker_pool.py and common/capacity.py for how
+    it is used."""
+
+    priority: int = Field(
+        job_store.DEFAULT_PRIORITY,
+        ge=job_store.MIN_PRIORITY,
+        le=job_store.MAX_PRIORITY,
+        description=(
+            "How urgent this job is, from 1 (most urgent) to 10 (least urgent). Optional -- if omitted, "
+            "the job gets 10. When jobs wait for a GPU, the more urgent one is served first, "
+            "across models too; jobs with the same priority are served in the order they were submitted. "
+            "A queued job's priority can be changed later with PUT /v1/jobs/{job_id}/priority. "
+            "Not used for ordering by LTX-2.3, LTX-2.5, Wan-Animate, RVC and TBDub: those jobs are "
+            "accepted with this field but always count as 10 when they compete for GPUs."
+        ),
+        examples=[10],
+    )
+
+
+class JobPriorityUpdate(BaseModel):
+    """Body of PUT /v1/jobs/{job_id}/priority."""
+
+    priority: int = Field(
+        ...,
+        ge=job_store.MIN_PRIORITY,
+        le=job_store.MAX_PRIORITY,
+        description="The new priority, from 1 (most urgent) to 10 (least urgent).",
+        examples=[1],
     )
 
 
@@ -423,6 +458,23 @@ class JobStatusResponse(BaseModel):
             "True if this job was submitted with `incognito: true`: its data is deleted as soon as "
             "it is no longer needed, and only a minimal record of it (this one) remains. False: "
             "everything about the job is kept until it is purged or `job_retention_days` pass."
+        ),
+        examples=[False],
+    )
+    priority: int = Field(
+        10,
+        description=(
+            "The job's priority, from 1 (most urgent) to 10 (least urgent, the default). See the "
+            "`priority` field of a generation request."
+        ),
+        examples=[10],
+    )
+    priority_editable: bool = Field(
+        False,
+        description=(
+            "True if PUT /v1/jobs/{job_id}/priority would change this job right now: it is still queued "
+            "and belongs to a backend that orders its queue by priority (every backend except LTX-2.3, "
+            "LTX-2.5, Wan-Animate, RVC and TBDub)."
         ),
         examples=[False],
     )

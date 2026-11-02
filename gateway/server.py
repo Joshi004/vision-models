@@ -58,6 +58,7 @@ from common.schemas import (
     HealthResponse,
     JobListItem,
     JobListResponse,
+    JobPriorityUpdate,
     JobStatusResponse,
     LipSyncResult,
     PartitionStatus,
@@ -136,7 +137,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="GPU Cluster Model-Serving API",
-    version="0.22.0",
+    version="0.23.0",
     description=openapi_docs.APP_DESCRIPTION,
     openapi_tags=openapi_docs.TAGS_METADATA,
     lifespan=lifespan,
@@ -432,6 +433,15 @@ def _lip_sync_result(row: sqlite3.Row) -> LipSyncResult | None:
     return None
 
 
+def _priority_editable(row: sqlite3.Row) -> bool:
+    """True if this job's priority can be changed now: it is still queued, and its backend orders
+    its queue by priority (a warm worker pool, or Qwen3.8). The other backends hand every job to
+    Slurm at once, so for them priority is only stored."""
+    if row["status"] != "queued":
+        return False
+    return worker_pool.pool_for_pipeline(row["pipeline"]) is not None or row["pipeline"].startswith("qwen38:")
+
+
 def _row_to_status(row: sqlite3.Row, typical_cache: dict[str, tuple[float | None, str | None]]) -> JobStatusResponse:
     """Shared by job_status and list_jobs so both report the same fields the
     same way."""
@@ -463,6 +473,8 @@ def _row_to_status(row: sqlite3.Row, typical_cache: dict[str, tuple[float | None
         attempts=row["attempts"],
         progress=progress,
         lip_sync=_lip_sync_result(row),
+        priority=row["priority"],
+        priority_editable=_priority_editable(row),
     )
 
 
@@ -571,6 +583,28 @@ def cancel_job(job_id: _JOB_ID_PARAM) -> CancelResponse:
     job_store.mark_failed(job_id, "Cancelled by client request.")
     retention.on_job_failed(job_id)
     return CancelResponse(cancelled=True)
+
+
+@app.put(
+    "/v1/jobs/{job_id}/priority",
+    tags=["Jobs"],
+    summary="Change a queued job's priority",
+    description=openapi_docs.SET_JOB_PRIORITY,
+    response_model=JobStatusResponse,
+    responses=openapi_docs.SET_JOB_PRIORITY_RESPONSES,
+)
+def set_job_priority(job_id: _JOB_ID_PARAM, body: JobPriorityUpdate) -> JobStatusResponse:
+    row = job_store.get_job(job_id)
+    if row is None:
+        raise HTTPException(404, "Unknown job_id.")
+    if row["status"] != "queued":
+        raise HTTPException(409, f"Only a queued job's priority can be changed (this job is {row['status']}).")
+    if not _priority_editable(row):
+        raise HTTPException(409, "This backend does not order its jobs by priority, so the priority cannot be changed.")
+    # False if the job started running between the check above and this update.
+    if not job_store.set_priority(job_id, body.priority):
+        raise HTTPException(409, "Only a queued job's priority can be changed (this job has just started).")
+    return _row_to_status(job_store.get_job(job_id), {})
 
 
 @app.delete(

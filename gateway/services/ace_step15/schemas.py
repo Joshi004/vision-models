@@ -12,7 +12,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from common.audio_inputs import ACCEPTED_AUDIO_FORMATS
-from common.schemas import IncognitoOptionMixin, PartitionOptionMixin
+from common.schemas import IncognitoOptionMixin, PriorityOptionMixin, PartitionOptionMixin
 from services.ace_step15 import config
 
 # "unknown" lets the model decide; otherwise an ISO-style language code such as en, zh, ja, pt-BR.
@@ -21,7 +21,7 @@ _LANGUAGE_PATTERN = r"^(unknown|[a-z]{2,3}(-[A-Za-z0-9]{2,8})?)$"
 _KEYSCALE_PATTERN = r"^[A-Za-z0-9#♭ ]{0,20}$"
 
 
-class _MusicRequestBase(PartitionOptionMixin, IncognitoOptionMixin):
+class _MusicRequestBase(PartitionOptionMixin, IncognitoOptionMixin, PriorityOptionMixin):
     """Fields shared by generate, cover and repaint."""
 
     caption: str = Field(

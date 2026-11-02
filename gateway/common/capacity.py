@@ -72,6 +72,7 @@ class _Model:
 _MODELS: dict[str, _Model] = {}
 budget_lock = threading.RLock()
 _reserved = 0  # GPUs promised to a worker that is being submitted but is not in its pool yet
+_waiting: dict[str, int] = {}  # model key -> priority of its most urgent request waiting for GPUs
 
 _settings_lock = threading.Lock()
 _settings: dict | None = None  # {"global_gpus": int, "max_jobs": {key: int}}, loaded on first use
@@ -236,6 +237,41 @@ def release(gpus: int) -> None:
         _reserved = max(0, _reserved - gpus)
 
 
+# --- priority between models ----------------------------------------------------------
+#
+# Every pool orders its own queue by priority (common/worker_pool.py). The models also compete
+# for the one global GPU budget, and this registry is how they see each other: a pool whose most
+# urgent queued request cannot start because the global limit is reached publishes that request's
+# priority here (set_waiting), on every scheduling pass, and clears it as soon as it can start.
+# While some model is waiting this way, a model whose own request is less urgent does not take
+# the GPUs that come free (outranked), and models stop their idle workers so the waiting one can
+# have their GPUs (other_model_waiting). One-shot backends (no queue of their own) always count as
+# the default priority.
+
+
+def set_waiting(key: str, priority: int | None) -> None:
+    """Publish (or, with None, withdraw) the priority of the most urgent request of this model
+    that is waiting for GPUs because of the global limit."""
+    with budget_lock:
+        if priority is None:
+            _waiting.pop(key, None)
+        else:
+            _waiting[key] = priority
+
+
+def outranked(key: str, priority: int) -> bool:
+    """True if another model has a request waiting for GPUs that is strictly more urgent than
+    `priority` (a lower number is more urgent)."""
+    with budget_lock:
+        return any(other < priority for waiting_key, other in _waiting.items() if waiting_key != key)
+
+
+def other_model_waiting(key: str) -> bool:
+    """True if any other model has a request waiting for GPUs because of the global limit."""
+    with budget_lock:
+        return any(waiting_key != key for waiting_key in _waiting)
+
+
 # --- one-shot backends ----------------------------------------------------------------
 
 
@@ -247,6 +283,11 @@ def _check_oneshot_locked(key: str) -> None:
     if own >= limit:
         raise CapacityError(
             f"{model.label} already has {own} job(s) queued or running (limit {limit}). Try again shortly."
+        )
+    if outranked(key, job_store.DEFAULT_PRIORITY):
+        raise CapacityError(
+            "A more urgent job of another model is waiting for GPUs, so this request is not accepted "
+            "right now. Try again shortly."
         )
     in_use = _gpus_in_use(counts)
     total = global_gpus()

@@ -25,6 +25,11 @@ from typing import Any
 
 from common import config
 
+# Priority runs from 1 (most urgent) to 10 (least urgent); a request that names none gets 10.
+MIN_PRIORITY = 1
+MAX_PRIORITY = 10
+DEFAULT_PRIORITY = MAX_PRIORITY
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
     job_id TEXT PRIMARY KEY,
@@ -113,6 +118,9 @@ def init_db() -> None:
         # `attempts`: how many times the job has been given to a worker (1 = first try).
         if "attempts" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1")
+        # `priority`: 1 (most urgent) to 10 (the default); jobs created before it existed get 10.
+        if "priority" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 10")
         # `sha256` of an upload's content; NULL for uploads saved before it existed.
         upload_columns = {row["name"] for row in conn.execute("PRAGMA table_info(uploads)")}
         if "sha256" not in upload_columns:
@@ -139,11 +147,14 @@ def create_job(
 ) -> None:
     """`gpus` and `estimated_run_seconds` are what the backend decided at submit time, for
     the backends that size their jobs (H3); None otherwise. `dedup_key` is what a later
-    identical request is matched on (common/dedup.py); None for a job that is never matched."""
+    identical request is matched on (common/dedup.py); None for a job that is never matched.
+    The job's priority is taken from the request body (`priority`, see PriorityOptionMixin);
+    DEFAULT_PRIORITY if the request has none."""
+    priority = request.get("priority", DEFAULT_PRIORITY)
     with _connect() as conn:
         conn.execute(
             "INSERT INTO jobs (job_id, pipeline, status, job_dir, partition, request_json, created_at, incognito, "
-            "gpus, estimated_run_seconds, dedup_key) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)",
+            "gpus, estimated_run_seconds, dedup_key, priority) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 job_id,
                 pipeline,
@@ -155,6 +166,7 @@ def create_job(
                 gpus,
                 estimated_run_seconds,
                 dedup_key,
+                priority,
             ),
         )
 
@@ -217,6 +229,41 @@ def statuses(job_ids: list[str]) -> dict[str, str]:
             for row in conn.execute(f"SELECT job_id, status FROM jobs WHERE job_id IN ({marks})", chunk):
                 found[row["job_id"]] = row["status"]
     return found
+
+
+def queued_priorities(job_ids: list[str]) -> dict[str, int]:
+    """job_id -> priority for those of these jobs that are still 'queued' (a job that is running,
+    finished or unknown is left out, which is how a caller finds the ones that stopped waiting).
+    Chunked like `statuses`."""
+    found: dict[str, int] = {}
+    with _connect() as conn:
+        for start in range(0, len(job_ids), 500):
+            chunk = job_ids[start : start + 500]
+            marks = ",".join("?" * len(chunk))
+            for row in conn.execute(
+                f"SELECT job_id, priority FROM jobs WHERE status = 'queued' AND job_id IN ({marks})", chunk
+            ):
+                found[row["job_id"]] = int(row["priority"])
+    return found
+
+
+def set_priority(job_id: str, priority: int) -> bool:
+    """Change the priority of a job that is still queued. False, and nothing changed, if the job
+    does not exist or is no longer queued."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE jobs SET priority = ? WHERE job_id = ? AND status = 'queued'", (priority, job_id)
+        )
+        return cursor.rowcount == 1
+
+
+def raise_priority(job_id: str, priority: int) -> None:
+    """Make a queued job at least as urgent as `priority` (a lower number); never lowers its urgency."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET priority = ? WHERE job_id = ? AND status = 'queued' AND priority > ?",
+            (priority, job_id, priority),
+        )
 
 
 def count_inflight_for(pipelines: tuple[str, ...]) -> int:

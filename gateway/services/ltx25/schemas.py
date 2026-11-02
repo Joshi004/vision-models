@@ -28,12 +28,12 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from common.schemas import IncognitoOptionMixin, PartitionOptionMixin
+from common.schemas import IncognitoOptionMixin, PriorityOptionMixin, PartitionOptionMixin
 from services.ltx.schemas import ImageConditioning, RetakeRequest, VideoShapeMixin
 from services.tbdub.schemas import LIP_SYNC_FIELD_DESCRIPTION, apply_lip_sync_shape
 
 
-class Ltx25TextToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin):
+class Ltx25TextToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin, PriorityOptionMixin):
     """Request body for POST /v1/ltx25/videos/generate -- text-to-video, or
     image-to-video when `images` is non-empty. See that endpoint's
     description for the fast-vs-quality tradeoff."""
@@ -102,7 +102,7 @@ class Ltx25TextToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOp
         return self
 
 
-class Ltx25InterpolateRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin):
+class Ltx25InterpolateRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin, PriorityOptionMixin):
     """Request body for POST /v1/ltx25/videos/interpolate -- generates the
     motion between a given first frame and a given last frame.
 
@@ -165,7 +165,7 @@ class Ltx25InterpolateRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOp
     )
 
 
-class Ltx25AudioToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin):
+class Ltx25AudioToVideoRequest(VideoShapeMixin, PartitionOptionMixin, IncognitoOptionMixin, PriorityOptionMixin):
     """Request body for POST /v1/ltx25/videos/audio-to-video -- generates video
     to match a given audio track, which is muxed into the output unchanged.
 

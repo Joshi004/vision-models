@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { cancelJob, purgeJob } from '../api.js';
+import { cancelJob, purgeJob, setJobPriority } from '../api.js';
 import { forgetSubmittedJob, useAutoCacheResults } from '../autoCache.js';
 import { deleteCachedResult } from '../resultCache.js';
 import { ACTIVE_STATUSES, useJobList } from '../utils.js';
@@ -30,6 +30,7 @@ export default function JobHistory({ jobRetentionDays, onRetry, canRetry, onRetr
   const [expandedId, setExpandedId] = useState(null);
   const [cancellingId, setCancellingId] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
+  const [priorityChangingId, setPriorityChangingId] = useState(null);
   const [deleteNote, setDeleteNote] = useState(null);
   const [pipelineFilter, setPipelineFilter] = usePersistedState('historyFilter:pipeline', 'all', {
     storage: window.sessionStorage,
@@ -63,6 +64,19 @@ export default function JobHistory({ jobRetentionDays, onRetry, canRetry, onRetr
       setError(err.message);
     } finally {
       setCancellingId(null);
+    }
+  }
+
+  async function handleChangePriority(job, priority) {
+    setPriorityChangingId(job.job_id);
+    setError(null);
+    try {
+      await setJobPriority(job.job_id, priority);
+      await refresh();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setPriorityChangingId(null);
     }
   }
 
@@ -159,6 +173,8 @@ export default function JobHistory({ jobRetentionDays, onRetry, canRetry, onRetr
             onToggleExpand={() => setExpandedId(expandedId === job.job_id ? null : job.job_id)}
             cancelling={cancellingId === job.job_id}
             onCancel={() => handleCancel(job.job_id)}
+            onChangePriority={handleChangePriority}
+            changingPriority={priorityChangingId === job.job_id}
             deleting={deletingId === job.job_id}
             onDelete={() => handleDelete(job)}
             onRetry={onRetry}

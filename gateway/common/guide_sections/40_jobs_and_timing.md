@@ -65,6 +65,21 @@ still references; this cannot be undone, and a queued/running job must be cancel
 deduplicating; to avoid sending a file the server may already hold, ask `POST /v1/uploads/by-hash` first (see
 "Skip re-uploading a file the server already has" in the Quickstart).
 
+**Priority:** every generation request may carry an optional top-level `priority`, an integer from 1 (most
+urgent) to 10 (least urgent). If it is omitted the job gets 10; a value outside 1-10 is refused with 422. The job's
+status reports it as `priority`. While jobs wait, the more urgent one goes first, and jobs of the same priority go
+in the order they were submitted. This holds for every backend except LTX-2.3, LTX-2.5, Wan-Animate, RVC and
+TBDub, and it also holds between models: when the global GPU limit is reached, the most urgent waiting job of any
+model gets the next free GPUs, and a less urgent job of another model does not take them (an idle GPU job of
+another model may be stopped early so its GPUs can be used). The five excluded backends accept the field but
+always count as 10 against other models: while a more urgent job of another model is waiting for GPUs, they answer
+**429** to a new request. Priority is strict, without ageing: a steady stream of urgent jobs can keep a priority-10
+job waiting. A repeated request that is recognised as an earlier, still queued job makes that job at least as
+urgent as the new request asked. To change a queued job's priority (whether or not it was given one), call
+`PUT /v1/jobs/{job_id}/priority` with `{"priority": 1}`: it answers 409 for a job that is no longer queued or whose
+backend does not use priority, and `priority_editable` on a job says whether the call would change it now. A change
+takes effect within a few seconds.
+
 **Concurrency:** the operator limits how many GPUs this service uses in total and how many jobs of each
 model run at once; both can change at any time, and `GET /v1/capacity` shows them with current usage. A
 model served by warm workers (every backend except LTX-2.3, LTX-2.5, RVC, TBDub and Wan-Animate) accepts

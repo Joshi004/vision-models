@@ -166,6 +166,17 @@ export function cancelJob(jobId) {
   return deleteJSON(`/v1/jobs/${jobId}`);
 }
 
+// Change a queued job's priority (1 = most urgent ... 10). A plain PUT, not postJSON:
+// it is not a job submission, so it must not carry `incognito`.
+export async function setJobPriority(jobId, priority) {
+  const response = await request(`/v1/jobs/${jobId}/priority`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ priority }),
+  });
+  return response.json();
+}
+
 // Permanent, unlike cancelJob above -- see JobHistory.jsx, the only caller.
 export function purgeJob(jobId) {
   return deleteJSON(`/v1/jobs/${jobId}/purge`);

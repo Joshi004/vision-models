@@ -36,7 +36,7 @@ from common import job_store, purge
 lock = threading.Lock()
 
 # Request fields that do not change what is produced.
-_IGNORED_FIELDS = ("partition", "incognito")
+_IGNORED_FIELDS = ("partition", "incognito", "priority")
 
 
 @dataclass(frozen=True)
@@ -125,5 +125,10 @@ def find_reusable(dedup_key: str | None) -> sqlite3.Row | None:
     return pick_reusable(job_store.find_by_dedup_key(dedup_key))
 
 
-def reuse(row: sqlite3.Row) -> Submission:
+def reuse(row: sqlite3.Row, priority: int) -> Submission:
+    """Answer a repeated request with the earlier job. If that job is still queued and the new
+    request is more urgent (a lower number), the job becomes that urgent: whoever asked last
+    should not wait longer than they would have for a new job."""
+    if row["status"] == "queued" and priority < row["priority"]:
+        job_store.raise_priority(row["job_id"], priority)
     return Submission(job_id=row["job_id"], status=row["status"], reused=True)

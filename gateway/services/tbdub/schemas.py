@@ -12,7 +12,7 @@ from typing import Any
 
 from pydantic import Field, model_validator
 
-from common.schemas import IncognitoOptionMixin, PartitionOptionMixin
+from common.schemas import IncognitoOptionMixin, PriorityOptionMixin, PartitionOptionMixin
 from services.tbdub import config
 
 # The `lip_sync` field of both LTX audio-to-video requests (2.3 and 2.5).
@@ -49,7 +49,7 @@ def apply_lip_sync_shape(req: Any) -> None:
     req.frame_rate = config.LIP_SYNC_FRAME_RATE
 
 
-class LipSyncRequest(PartitionOptionMixin, IncognitoOptionMixin):
+class LipSyncRequest(PartitionOptionMixin, IncognitoOptionMixin, PriorityOptionMixin):
     """Request body for POST /v1/tbdub/videos/lip-sync.
 
     Two ways to say what to sync: a video and an audio file you uploaded

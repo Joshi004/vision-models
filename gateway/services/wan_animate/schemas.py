@@ -17,10 +17,10 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from common.schemas import IncognitoOptionMixin, PartitionOptionMixin
+from common.schemas import IncognitoOptionMixin, PriorityOptionMixin, PartitionOptionMixin
 
 
-class ReplaceRequest(PartitionOptionMixin, IncognitoOptionMixin):
+class ReplaceRequest(PartitionOptionMixin, IncognitoOptionMixin, PriorityOptionMixin):
     """Request body for POST /v1/wan-animate/videos/replace.
 
     Swaps the person in an existing video for a reference character while

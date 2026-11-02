@@ -132,7 +132,7 @@ def _dispatch(req: Yue2GenerateRequest | Yue2CoverRequest, mode: str) -> dedup.S
     with dedup.lock:
         earlier = dedup.find_reusable(dedup_key)
         if earlier is not None:
-            return dedup.reuse(earlier)
+            return dedup.reuse(earlier, req.priority)
         _check_capacity()
         job_dir.mkdir(parents=True)
         job_store.create_job(job_id, pipeline, job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito, dedup_key=dedup_key)

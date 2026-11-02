@@ -342,6 +342,22 @@ This only stops the job -- it doesn't delete anything. See
 and database row.
 """
 
+SET_JOB_PRIORITY = """
+Changes the priority of a job that is still `queued`, from 1 (most urgent) to 10 (least urgent). This works
+whether or not the job was submitted with a `priority`; it takes effect within a few seconds (the next
+scheduling pass), and can be repeated as often as needed.
+
+Only jobs of backends that order their queue by priority can be changed: every backend except LTX-2.3,
+LTX-2.5, Wan-Animate, RVC and TBDub, whose jobs are handed to the cluster scheduler at once and always count as
+10. The `priority_editable` field of a job tells whether this call would change it right now.
+
+A job can be shared: when a backend recognised a request as a repeat of an earlier one, it returned that
+earlier job's `job_id` (`reused: true`), so changing its priority changes it for everyone who was given that
+`job_id`.
+
+The response is the job's updated status, the same as `GET /v1/jobs/{job_id}`.
+"""
+
 PURGE_JOB = f"""
 Permanently deletes a job that has already finished (`succeeded` or `failed`)
 -- its own directory (output file, logs, and any intermediate files), its
@@ -517,6 +533,18 @@ JOB_RESULT_RESPONSES = {
 
 CANCEL_RESPONSES = {
     **_JOB_NOT_FOUND_RESPONSE,
+}
+
+SET_JOB_PRIORITY_RESPONSES = {
+    **_JOB_NOT_FOUND_RESPONSE,
+    409: {
+        "description": "The job is no longer queued (it is running or finished), or its backend does not order its queue by priority.",
+        "content": {
+            "application/json": {
+                "example": {"detail": "Only a queued job's priority can be changed (this job is running)."}
+            }
+        },
+    },
 }
 
 PURGE_RESPONSES = {

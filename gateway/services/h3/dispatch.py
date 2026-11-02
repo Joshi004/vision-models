@@ -227,7 +227,7 @@ def _dispatch(pipeline: str, req, build_args) -> tuple[dedup.Submission, int | N
     with dedup.lock:
         earlier = dedup.find_reusable(dedup_key)
         if earlier is not None:
-            return dedup.reuse(earlier), earlier["gpus"], earlier["estimated_run_seconds"]
+            return dedup.reuse(earlier, req.priority), earlier["gpus"], earlier["estimated_run_seconds"]
         _check_capacity()
         job_dir.mkdir(parents=True)
         sized.save(job_dir)

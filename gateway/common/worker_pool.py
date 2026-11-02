@@ -288,6 +288,7 @@ class WorkerPool:
         self.dir = POOLS_DIR / name
         self._lock = threading.RLock()
         self._queue: list[PoolRequest] = []
+        self._priority_of: dict[str, int] = {}  # job_id -> priority, as of the last _refresh_queue
         self._workers: dict[str, Worker] = {}
         self._gpus_held = 0  # GPUs of every worker in _workers; updated by _workers_changed
         self._start_failures = 0
@@ -562,10 +563,12 @@ class WorkerPool:
         Returns the requests that cannot be served, with the reason; the caller fails them."""
         failures: list[tuple[PoolRequest, str]] = []
         now = time.time()
+        self._refresh_queue()
         self._assign_to_free_workers(now, failures)
         unserved = self._claim_starting_workers()
         self._trim_over_limit()
         gave_up_starting = False
+        blocked_priority: int | None = None  # priority of the request that the global GPU limit holds back
         for request in unserved:
             if self._start_failures >= MAX_START_FAILURES:
                 gave_up_starting = True
@@ -577,9 +580,13 @@ class WorkerPool:
                     )
                 )
                 continue
+            priority = self._priority_of.get(request.job_id, job_store.DEFAULT_PRIORITY)
+            if capacity.outranked(self.name, priority):
+                break  # a more urgent request of another model is waiting for GPUs: leave them to it
             if not self._make_room_for_worker():
                 break  # at this pool's limit and every worker is busy or still needed: wait
             if not self._reserve_gpus(request.gpus):
+                blocked_priority = priority
                 break  # the service is at its global GPU limit: wait for GPUs to be freed
             try:
                 self._start_worker(request)
@@ -587,6 +594,8 @@ class WorkerPool:
                 failures.append((request, str(e)))
             finally:
                 capacity.release(request.gpus)
+        # Tell the other models whether this pool is waiting for GPUs (see common/capacity.py).
+        capacity.set_waiting(self.name, blocked_priority)
         if gave_up_starting:
             self._start_failures = 0  # the next request gets a fresh try
         for request, _ in failures:
@@ -630,14 +639,21 @@ class WorkerPool:
                 return False
         return True
 
+    def _refresh_queue(self) -> None:
+        """Drop the requests that are no longer queued (cancelled or failed while they waited) and put
+        the rest in priority order, most urgent first. The sort is stable, so requests of the same
+        priority stay in the order they had (first come, first served; a request put back after its
+        worker was lost stays ahead of the others). The priorities are read from the job table on
+        every pass, which is how a change made from the UI takes effect.
+
+        One query for the whole queue: with hundreds of waiting requests, a query each would be run
+        every tick while holding the lock that new submissions need."""
+        queued = job_store.queued_priorities([request.job_id for request in self._queue]) if self._queue else {}
+        self._queue = sorted((request for request in self._queue if request.job_id in queued), key=lambda r: queued[r.job_id])
+        self._priority_of = queued
+
     def _assign_to_free_workers(self, now: float, failures: list[tuple[PoolRequest, str]]) -> None:
-        # One query for the whole queue: with hundreds of waiting requests, a query each would be
-        # run every tick while holding the lock that new submissions need.
-        status_of = job_store.statuses([request.job_id for request in self._queue]) if self._queue else {}
         for request in list(self._queue):
-            if status_of.get(request.job_id) != "queued":
-                self._queue.remove(request)  # cancelled or failed while it waited
-                continue
             candidates = sorted(
                 (w for w in self._workers.values() if w.is_free() and not w.retire and w.matches(request)),
                 # The smallest worker that fits, and of those the one that went idle last, so older idle
@@ -716,6 +732,9 @@ class WorkerPool:
                 continue
             if worker.retire:
                 self._stop_worker(worker, "too little Slurm time left")
+            elif capacity.other_model_waiting(self.name):
+                # A request of another model is waiting for GPUs and this idle worker holds some.
+                self._stop_worker(worker, "another model is waiting for GPUs")
             elif worker.idle_since is not None and now - worker.idle_since >= self.idle_seconds:
                 self._stop_worker(worker, f"idle for {self.idle_seconds / 60:g} minutes")
 

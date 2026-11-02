@@ -26,7 +26,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from common.schemas import IncognitoOptionMixin, PartitionOptionMixin
+from common.schemas import IncognitoOptionMixin, PriorityOptionMixin, PartitionOptionMixin
 from services.h3 import config
 
 
@@ -123,7 +123,7 @@ class H3SamplingMixin(BaseModel):
     )
 
 
-class H3GenerateRequest(H3ShapeMixin, H3SamplingMixin, PartitionOptionMixin, IncognitoOptionMixin):
+class H3GenerateRequest(H3ShapeMixin, H3SamplingMixin, PartitionOptionMixin, IncognitoOptionMixin, PriorityOptionMixin):
     """Request body for POST /v1/h3/videos/generate -- text-to-video, or image-to-video
     with a first and/or last frame."""
 
@@ -168,7 +168,7 @@ class H3GenerateRequest(H3ShapeMixin, H3SamplingMixin, PartitionOptionMixin, Inc
     )
 
 
-class H3AudioToVideoRequest(H3ShapeMixin, H3SamplingMixin, PartitionOptionMixin, IncognitoOptionMixin):
+class H3AudioToVideoRequest(H3ShapeMixin, H3SamplingMixin, PartitionOptionMixin, IncognitoOptionMixin, PriorityOptionMixin):
     """Request body for POST /v1/h3/videos/audio-to-video -- video + audio from image and/or
     video references, optionally with audio references (H3's reference mode: up to 9 images,
     3 videos and 3 audio clips, 12 in all).

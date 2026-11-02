@@ -5,7 +5,11 @@ import { JobTimingDetail, JobTimingSummary } from './JobTiming.jsx';
 import ResultPreview from './ResultPreview.jsx';
 import Button from './ui/Button.jsx';
 import Badge from './ui/Badge.jsx';
+import Select from './ui/Select.jsx';
 import { ChevronDownIcon, CopyIcon, TrashIcon } from './icons.jsx';
+
+// 1 (most urgent) to 10 (least urgent); the API's own range for a job's priority.
+const PRIORITY_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
 const STATUS_TONE = {
   succeeded: 'success',
@@ -33,6 +37,11 @@ const STATUS_TONE = {
 // lip sync did not apply (job.lip_sync.applied === false, so the result is the
 // video WITHOUT lip sync), as a one-click way to redo only the sync.
 //
+// `onChangePriority(job, priority)` is optional too: while a job is queued and
+// `job.priority_editable` is true, a 1-10 picker with a "Set priority" button is
+// shown (PUT /v1/jobs/{job_id}/priority). `changingPriority` disables it while
+// the call is in flight.
+//
 // `highlighted` (set briefly by JobsPanel for a job it just saw appear)
 // adds a short-lived accent ring so a just-submitted job is easy to spot
 // in the list without having to scan for it.
@@ -49,7 +58,12 @@ export default function JobRow({
   canRetry,
   onRetryLipSync,
   highlighted,
+  onChangePriority,
+  changingPriority,
 }) {
+  // The priority picked in the select below but not applied yet; null while the select just
+  // shows the job's own priority.
+  const [priorityDraft, setPriorityDraft] = useState(null);
   // 'copied' | 'failed' | null -- transient feedback for the Copy JSON
   // button below, cleared automatically a couple seconds later.
   const [copyState, setCopyState] = useState(null);
@@ -81,6 +95,13 @@ export default function JobRow({
   const finished = !ACTIVE_STATUSES.has(job.status);
   const lipSyncFailed = job.status === 'succeeded' && job.lip_sync?.applied === false;
   const showRetry = Boolean(onRetry) && finished && (canRetry ? canRetry(job) : true);
+  const showPriorityEditor = Boolean(onChangePriority) && job.priority_editable === true;
+  const selectedPriority = priorityDraft ?? job.priority;
+
+  async function handleApplyPriority() {
+    await onChangePriority(job, selectedPriority);
+    setPriorityDraft(null);
+  }
 
   return (
     <li
@@ -97,6 +118,7 @@ export default function JobRow({
         <span className="text-text">{job.pipeline}</span>
         <JobTimingSummary job={job} now={now} />
         <span className="font-mono text-xs text-muted">{job.job_id.slice(0, 8)}</span>
+        {!finished && job.priority != null && <span className="text-xs text-muted">priority {job.priority}</span>}
         {job.partition && <span className="text-xs text-muted">partition: {job.partition}</span>}
         {job.gpus != null && <span className="text-xs text-muted">{job.gpus} GPUs</span>}
         <ChevronDownIcon className={`ml-auto h-4 w-4 shrink-0 text-muted transition-transform ${expanded ? 'rotate-180' : ''}`} />
@@ -124,6 +146,35 @@ export default function JobRow({
                   </Button>
                 </div>
               )}
+            </div>
+          )}
+
+          {showPriorityEditor && (
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-2 text-xs text-muted">
+                Priority (1 = most urgent)
+                <Select
+                  value={selectedPriority}
+                  disabled={changingPriority}
+                  onChange={(event) => setPriorityDraft(Number(event.target.value))}
+                  className="w-20"
+                >
+                  {PRIORITY_OPTIONS.map((value) => (
+                    <option key={value} value={value}>
+                      {value}
+                    </option>
+                  ))}
+                </Select>
+              </label>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={changingPriority || selectedPriority === job.priority}
+                onClick={handleApplyPriority}
+              >
+                {changingPriority ? 'Saving\u2026' : 'Set priority'}
+              </Button>
             </div>
           )}
 

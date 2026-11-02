@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from common.schemas import IncognitoOptionMixin
+from common.schemas import IncognitoOptionMixin, PriorityOptionMixin
 from services.qwen38 import config
 
 
@@ -23,7 +23,7 @@ class ChatMessage(BaseModel):
     content: str = Field(..., min_length=1, description="The message text.")
 
 
-class Qwen38GenerateRequest(IncognitoOptionMixin):
+class Qwen38GenerateRequest(IncognitoOptionMixin, PriorityOptionMixin):
     """Request body for POST /v1/qwen38/generate."""
 
     messages: list[ChatMessage] = Field(

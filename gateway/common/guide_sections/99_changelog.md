@@ -4,6 +4,13 @@ Dates are when a change shipped on this codebase, not necessarily when you're re
 `api_version` field (`GET /v1/guide?format=json`) is this server's own current version; compare it
 against what you last integrated against.
 
+- **0.23.0** (2026-11-03): **Job priority.** Every generation request accepts an optional `priority`, an integer from
+  1 (most urgent) to 10 (least urgent, the default when omitted). Waiting jobs are served most urgent first, with
+  ties in submission order, across all models that share the GPU limit; LTX-2.3, LTX-2.5, Wan-Animate, RVC and TBDub
+  accept the field but always count as 10 and may answer 429 while a more urgent job of another model waits for
+  GPUs. New endpoint `PUT /v1/jobs/{job_id}/priority` changes a queued job's priority (409 if it is no longer
+  queued or its backend does not use priority). Job status and the jobs list gain `priority` and
+  `priority_editable`. Otherwise additive: a request without `priority` behaves as before.
 - **0.22.0** (2026-11-01): **Upload confirmation and "skip re-uploading".** `POST /v1/uploads` now answers with the
   file's `sha256` (and `reused: false`) next to `size_bytes`, so you can confirm the whole file arrived intact. New
   endpoint `POST /v1/uploads/by-hash` (`{"sha256": "..."}`): 200 returns the `asset_id` of a copy the server already
