@@ -80,9 +80,30 @@ urgent as the new request asked. To change a queued job's priority (whether or n
 backend does not use priority, and `priority_editable` on a job says whether the call would change it now. A change
 takes effect within a few seconds.
 
+**Finding jobs (filters and pages):** `GET /v1/jobs` returns only the newest `limit` jobs. To page through the
+rest, or to find jobs by their properties, `POST /v1/jobs/search` takes a JSON body with `offset` and `limit` (at
+most 500) and any of these optional filters, combined with AND: `statuses`, `pipelines` (exact
+`<backend>:<recipe>` strings), `source`, `job_ids` / `exclude_job_ids` (at most 10000 each) and `q` (text to find in
+the job id or the request's `prompt`). The answer has the same `jobs` entries as `GET /v1/jobs` plus `total`, the
+number of matching jobs across all pages. A page is a snapshot: while jobs are being submitted, a job can show up
+on two pages or be missed when you move from one page to the next.
+
+**Who submitted a job:** every job reports `source`: `"ui"` if the request carried the header `X-Job-Source: ui`
+(the web UI sends it), `"api"` for any other client, null for jobs submitted before the field existed. Send the
+header yourself only if you want your jobs listed as UI jobs; it is a label, not authentication. A repeated
+request that is answered with an earlier job keeps that job's `source`.
+
 **Concurrency:** the operator limits how many GPUs this service uses in total and how many jobs of each
 model run at once; both can change at any time, and `GET /v1/capacity` shows them with current usage. A
 model served by warm workers (every backend except LTX-2.3, LTX-2.5, RVC, TBDub and Wan-Animate) accepts
 your request and keeps it `queued` until a slot is free. The five that run one Slurm job per request
 answer **429** when their own limit or the global GPU limit is reached: nothing was queued, retry shortly.
 Lowering a limit never cancels a job that is already running.
+
+**Why a job is still queued:** while a job is `queued`, `queue_state` says why, as of the last scheduling pass (a few
+seconds old at most); it is null for any other status. `scheduling`: not looked at yet. `model_limit`: its model is at
+its own limit of jobs (for Qwen3.8, every request slot of the server is in use). `gpu_limit`: the service's global GPU
+limit is reached. `priority`: a more urgent job of another model gets the free GPUs first. `slurm_pending`: waiting for
+the cluster to allocate GPUs. `model_loading`: GPUs are allocated and the worker or server is loading the model. A job
+of LTX-2.3, LTX-2.5, Wan-Animate, RVC or TBDub only ever shows `slurm_pending`. `GET /v1/capacity` counts the queued
+jobs by these reasons (`queued_by_reason`), per model and in total.

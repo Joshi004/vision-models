@@ -4,14 +4,20 @@ import { forgetSubmittedJob, useAutoCacheResults } from '../autoCache.js';
 import { deleteCachedResult } from '../resultCache.js';
 import { ACTIVE_STATUSES, useJobList } from '../utils.js';
 import { useToast } from './ui/Toast.jsx';
+import Button from './ui/Button.jsx';
 import JobRow from './JobRow.jsx';
+
+// How many more jobs "Load more" fetches, and the most GET /v1/jobs returns.
+const PAGE_STEP = 50;
+const MAX_LIMIT = 500;
 
 // Backs GET /v1/jobs -- shows every job this server still has a row for
 // (any backend, including ones submitted by curl or an agent, not just
 // from this browser tab), polling while any of them are still queued or
-// running. Deliberately small (last 50; Cancel, Retry and permanent Delete
-// per job) since it's shown beside every form, not just its own page -- see
-// components/JobHistory.jsx for the fuller, filterable view.
+// running. Deliberately small (last 50, more on "Load more"; Cancel, Retry
+// and permanent Delete per job) since it's shown beside every form, not just
+// its own page -- see components/JobHistory.jsx for the fuller, filterable,
+// paged view.
 //
 // `onRetry`/`canRetry` come from App.jsx unchanged -- see JobRow.jsx for
 // what each does; this component has no retry logic of its own.
@@ -22,7 +28,9 @@ import JobRow from './JobRow.jsx';
 // skipped on the very first load (seenRef starts at `null`), so opening
 // the app never floods either for jobs that were already sitting there.
 export default function JobsPanel({ refreshSignal, onRetry, canRetry, onRetryLipSync }) {
-  const { jobs, loaded, error, setError, now, refresh } = useJobList(50, refreshSignal);
+  // Starts at the newest PAGE_STEP jobs; "Load more" below raises it by PAGE_STEP at a time.
+  const [limit, setLimit] = useState(PAGE_STEP);
+  const { jobs, loaded, error, setError, now, refresh } = useJobList(limit, refreshSignal);
   const [expandedId, setExpandedId] = useState(null);
   const [cancellingId, setCancellingId] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
@@ -33,9 +41,14 @@ export default function JobsPanel({ refreshSignal, onRetry, canRetry, onRetryLip
   const seenRef = useRef(null);
   useAutoCacheResults(jobs);
 
+  // "Load more" brings in older jobs this tab has never seen: that must not highlight them all.
+  const seenLimitRef = useRef(limit);
+
   useEffect(() => {
     const seen = seenRef.current;
-    if (seen) {
+    const limitChanged = seenLimitRef.current !== limit;
+    seenLimitRef.current = limit;
+    if (seen && !limitChanged) {
       for (const job of jobs) {
         const previousStatus = seen.get(job.job_id);
         if (previousStatus === undefined) {
@@ -164,6 +177,12 @@ export default function JobsPanel({ refreshSignal, onRetry, canRetry, onRetryLip
           />
         ))}
       </ul>
+
+      {filter === 'all' && jobs.length >= limit && limit < MAX_LIMIT && (
+        <Button type="button" variant="secondary" size="sm" onClick={() => setLimit(Math.min(limit + PAGE_STEP, MAX_LIMIT))}>
+          Load more
+        </Button>
+      )}
     </section>
   );
 }

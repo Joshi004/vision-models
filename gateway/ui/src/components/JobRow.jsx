@@ -113,6 +113,8 @@ export default function JobRow({
         <Badge tone={STATUS_TONE[job.status] ?? 'neutral'}>{job.status}</Badge>
         {isCached && <Badge tone="accent">Cached</Badge>}
         {job.incognito && <Badge tone="warning">Incognito</Badge>}
+        {job.source === 'ui' && <Badge tone="neutral">UI</Badge>}
+        {job.source === 'api' && <Badge tone="neutral">API</Badge>}
         {job.status === 'succeeded' && job.lip_sync?.applied === true && <Badge tone="success">Lip-synced</Badge>}
         {job.status === 'succeeded' && job.lip_sync?.applied === false && <Badge tone="warning">No lip sync</Badge>}
         <span className="text-text">{job.pipeline}</span>

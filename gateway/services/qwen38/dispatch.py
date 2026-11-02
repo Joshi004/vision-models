@@ -40,7 +40,21 @@ PIPELINE = "qwen38:generate"
 # The one shared model server holds 1 GPU while it is up. It has no limit of its own on the
 # capacity page (how many requests it serves at once is fixed when it starts); its GPU still
 # counts toward the global limit.
-capacity.register("qwen38", "Qwen3.8 language model", capacity.FIXED, planning_gpus=1, gpus_held=server_manager.gpus_held)
+capacity.register(
+    "qwen38",
+    "Qwen3.8 language model",
+    capacity.FIXED,
+    planning_gpus=1,
+    gpus_held=server_manager.gpus_held,
+    snapshot=lambda: snapshot(),  # defined below
+)
+
+# Where each request of this process is: waiting for a free slot of the server, holding one while it
+# waits for the server to start, or running. Written on the event loop, read by the API threads.
+_PHASE_SLOT = "slot"
+_PHASE_SERVER = "server"
+_PHASE_RUNNING = "running"
+_phases: dict[str, str] = {}
 
 _tasks: dict[str, asyncio.Task] = {}
 _calls: dict[str, server_manager.ChatCall] = {}
@@ -194,14 +208,17 @@ async def _run(job_id: str, job_dir: Path, req: Qwen38GenerateRequest) -> None:
     output_path = job_dir / "output.json"
     server_manager.request_started()
     started = time.monotonic()
+    _phases[job_id] = _PHASE_SLOT
     try:
         # Waiting for a free slot comes first: only the few requests that hold one wait for the server
         # (which polls Slurm), however many more are queued behind them.
         async with _get_gate().slot(job_id):
             while True:
+                _phases[job_id] = _PHASE_SERVER
                 await asyncio.to_thread(server_manager.ensure_server)
                 await server_manager.wait_until_ready(config.STARTUP_TIMEOUT_SECONDS)
                 job_store.mark_running(job_id)
+                _phases[job_id] = _PHASE_RUNNING
                 waited = time.monotonic() - started
                 call = server_manager.ChatCall()
                 _calls[job_id] = call
@@ -234,7 +251,50 @@ async def _run(job_id: str, job_dir: Path, req: Qwen38GenerateRequest) -> None:
         _fail(job_id, job_dir, "Unexpected error while running the request. See the gateway log.")
     finally:
         _calls.pop(job_id, None)
+        _phases.pop(job_id, None)
         server_manager.request_finished()
+
+
+def queue_state(job_id: str) -> str:
+    """Why a queued request is not running yet (a capacity.QUEUE_* value)."""
+    phase = _phases.get(job_id)
+    if phase == _PHASE_SLOT:
+        return capacity.QUEUE_MODEL_LIMIT  # every request slot of the server is in use
+    if phase == _PHASE_SERVER:
+        server = server_manager.last_phase()
+        if server == "pending":
+            return capacity.QUEUE_SLURM_PENDING
+        if server in ("loading", "ready"):
+            return capacity.QUEUE_MODEL_LOADING
+    return capacity.QUEUE_SCHEDULING
+
+
+def snapshot() -> dict:
+    """Running and waiting requests and the server's GPU, for GET /v1/capacity."""
+    held = server_manager.gpus_held()
+    pending = held if server_manager.last_phase() == "pending" else 0
+    phases = list(_phases.items())
+    queued_by_reason: dict[str, int] = {}
+    running = 0
+    for job_id, phase in phases:
+        if phase == _PHASE_RUNNING:
+            running += 1
+        else:
+            reason = queue_state(job_id)
+            queued_by_reason[reason] = queued_by_reason.get(reason, 0) + 1
+    return {
+        "gpus_held": held,
+        "gpus_allocated": held - pending,
+        "gpus_pending": pending,
+        "busy": running,
+        "idle": 0,
+        "starting": 0,
+        "workers_pending": 0,
+        "workers_loading": 0,
+        "running_jobs": running,
+        "queued": sum(queued_by_reason.values()),
+        "queued_by_reason": queued_by_reason,
+    }
 
 
 def _start_task(job_id: str, job_dir: Path, req: Qwen38GenerateRequest) -> None:

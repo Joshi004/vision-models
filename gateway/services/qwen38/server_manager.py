@@ -121,17 +121,36 @@ def _clear_state() -> None:
         path.unlink(missing_ok=True)
 
 
+# The server's phase as of the last _snapshot, for the capacity page (it must not call Slurm itself):
+# "unknown" (nothing looked yet), "stopped", "pending" (its Slurm job waits for a GPU), "loading"
+# (it has a GPU and is starting vLLM) or "ready". _snapshot runs at least every IDLE_CHECK_SECONDS.
+_last_phase = "unknown"
+
+
+def last_phase() -> str:
+    return _last_phase
+
+
 def _snapshot() -> _Snapshot:
+    global _last_phase
     slurm_job_id = _read_job_id()
     if slurm_job_id is None:
+        _last_phase = "stopped"
         return _Snapshot("stopped", None, None)
     slurm_state = _squeue_state(slurm_job_id)
     if slurm_state is not None and slurm_state not in _LIVE_STATES:
         _clear_state()
+        _last_phase = "stopped"
         return _Snapshot("stopped", None, None)
     info = _read_json(_STATE_FILE)
     if info is not None and info.get("slurm_job_id") == slurm_job_id and slurm_state in ("RUNNING", None):
+        _last_phase = "ready"
         return _Snapshot("ready", slurm_job_id, info)
+    if slurm_state in ("PENDING", "CONFIGURING"):
+        _last_phase = "pending"
+    elif slurm_state == "RUNNING":
+        _last_phase = "loading"
+    # else squeue could not answer: keep the phase seen last
     return _Snapshot("starting", slurm_job_id, None)
 
 

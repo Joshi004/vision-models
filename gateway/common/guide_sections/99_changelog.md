@@ -4,6 +4,19 @@ Dates are when a change shipped on this codebase, not necessarily when you're re
 `api_version` field (`GET /v1/guide?format=json`) is this server's own current version; compare it
 against what you last integrated against.
 
+- **0.25.0** (2026-11-03): **Why a job is queued, and real GPU usage.** A queued job's status and the jobs list gain
+  `queue_state` (`scheduling`, `model_limit`, `gpu_limit`, `priority`, `slurm_pending` or `model_loading`; null unless
+  the job is queued). `GET /v1/capacity` and `PUT /v1/capacity` gain, per model and in total, `gpus_allocated` and
+  `gpus_pending` (the two parts of `gpus_in_use`), `running_jobs` and `queued_by_reason`; the totals also have
+  `queued_jobs`, and each model has `workers_pending` and `workers_loading`. Nothing that was there changed meaning,
+  and no scheduling behaviour changed. The web UI's GPU capacity page and queued job rows show the new fields.
+- **0.24.0** (2026-11-03): **Job search and job source.** New endpoint `POST /v1/jobs/search` returns one page of
+  jobs (`offset`, `limit` up to 500, newest first) that match optional filters: `statuses`, `pipelines`, `source`,
+  `job_ids`, `exclude_job_ids` and `q` (text in the job id or prompt); the answer is the `GET /v1/jobs` list plus
+  `total`, `offset` and `limit`. Job status and the jobs list gain `source`: `"ui"` when the request carried the header
+  `X-Job-Source: ui` (the web UI sends it), `"api"` for any other client, null for jobs submitted before this
+  version. `GET /v1/jobs` is unchanged. The web UI's job history now pages and filters on the server (status, model,
+  job type, media, sent by, cached in this browser, search). Otherwise additive.
 - **0.23.0** (2026-11-03): **Job priority.** Every generation request accepts an optional `priority`, an integer from
   1 (most urgent) to 10 (least urgent, the default when omitted). Waiting jobs are served most urgent first, with
   ties in submission order, across all models that share the GPU limit; LTX-2.3, LTX-2.5, Wan-Animate, RVC and TBDub

@@ -1,23 +1,82 @@
 import { useEffect, useRef, useState } from 'react';
-import { listJobs } from './api.js';
+import { listJobs, searchJobs } from './api.js';
 import { rememberSubmittedJob } from './autoCache.js';
+import { listCachedJobIds } from './resultCache.js';
 
 // Statuses that mean "not finished yet" -- the only ones a job can still be
-// cancelled from, and the only ones useJobList's once-a-second elapsed-time
-// tick runs for. The complement (succeeded/failed) is "finished": the only
-// state a job can be permanently deleted from -- see JobRow.jsx.
+// cancelled from, and the only ones the once-a-second elapsed-time tick
+// (usePolledJobs below) runs for. The complement (succeeded/failed) is
+// "finished": the only state a job can be permanently deleted from -- see
+// JobRow.jsx.
 export const ACTIVE_STATUSES = new Set(['queued', 'running']);
+
+// Why a queued job is not running yet: the API's `queue_state` values (common/capacity.py's
+// QUEUE_* constants), in the order they are listed on the GPU capacity page. `short` is a column heading, `label` the
+// name, `explain` one sentence for a tooltip or legend, `waitingFor` completes "waiting for ...".
+export const QUEUE_STATES = [
+  {
+    key: 'model_limit',
+    short: 'Model limit',
+    label: 'Model at its limit',
+    explain: 'Its model already runs the most jobs it may run at once (Qwen3.8: every request slot of the server is in use).',
+    waitingFor: 'a free slot of its model',
+  },
+  {
+    key: 'gpu_limit',
+    short: 'GPU limit',
+    label: 'Global GPU limit',
+    explain: "The service's global GPU limit is reached.",
+    waitingFor: 'the global GPU limit to free up',
+  },
+  {
+    key: 'priority',
+    short: 'Priority',
+    label: 'Behind a more urgent job',
+    explain: 'A more urgent job of another model is waiting for GPUs and gets the free ones first.',
+    waitingFor: 'a more urgent job of another model',
+  },
+  {
+    key: 'slurm_pending',
+    short: 'Slurm',
+    label: 'Waiting for Slurm GPUs',
+    explain: 'Waiting for the cluster (Slurm) to allocate the GPUs.',
+    waitingFor: 'the cluster to allocate GPUs',
+  },
+  {
+    key: 'model_loading',
+    short: 'Loading',
+    label: 'Loading the model',
+    explain: 'GPUs are allocated; the worker or server is loading the model.',
+    waitingFor: 'the model to load',
+  },
+  {
+    key: 'scheduling',
+    short: 'Scheduling',
+    label: 'Scheduling',
+    explain: 'The scheduler has not looked at it yet (a few seconds at most).',
+    waitingFor: 'the scheduler',
+  },
+];
+
+export const QUEUE_STATE_BY_KEY = Object.fromEntries(QUEUE_STATES.map((state) => [state.key, state]));
 
 const POLL_MS = 10000;
 
-// Shared by JobsPanel.jsx (the small strip shown under every form) and
-// JobHistory.jsx (the full, filterable view) -- polls GET /v1/jobs, and
-// ticks `now` once a second while anything is still queued/running so
-// elapsed-time text (JobTiming.jsx) updates smoothly between polls.
-// `setError` is returned too, not just `error`, so a caller's own action
-// (cancel, delete) that fails can report through this same error state.
-export function useJobList(limit, refreshSignal) {
+// The most cached job ids sent to the server for the Cached / Not cached
+// filter -- the API's own cap on `job_ids` / `exclude_job_ids`.
+const MAX_FILTER_JOB_IDS = 10000;
+
+// Polling shared by useJobList and useJobSearch: calls `fetchJobs()` (which
+// resolves to `{ jobs, total?, server_time? }`) on mount, every POLL_MS, whenever
+// `fetchKey` changes (the caller's way of saying "the query is different now"),
+// and whenever `refreshSignal` is bumped. Ticks `now` once a second while
+// anything is still queued/running so elapsed-time text (JobTiming.jsx)
+// updates smoothly between polls. `setError` is returned too, not just
+// `error`, so a caller's own action (cancel, delete) that fails can report
+// through this same error state.
+function usePolledJobs(fetchJobs, fetchKey, refreshSignal) {
   const [jobs, setJobs] = useState([]);
+  const [total, setTotal] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(null);
   // server_time (from the last successful poll) minus this browser's own
@@ -26,19 +85,28 @@ export function useJobList(limit, refreshSignal) {
   const [clockOffsetMs, setClockOffsetMs] = useState(0);
   const [now, setNow] = useState(() => new Date());
   const timerRef = useRef(null);
+  // Always the latest fetchJobs, so the interval below never calls a stale one.
+  const fetchRef = useRef(fetchJobs);
+  fetchRef.current = fetchJobs;
+  // Counts requests so a slow response to an older query can't overwrite the
+  // result of a newer one (e.g. after a quick filter change).
+  const requestCounterRef = useRef(0);
 
   async function refresh() {
+    const requestId = ++requestCounterRef.current;
     try {
-      const result = await listJobs(limit);
+      const result = await fetchRef.current();
+      if (requestId !== requestCounterRef.current) return;
       setJobs(result.jobs);
+      setTotal(result.total ?? result.jobs.length);
       setError(null);
       if (result.server_time) {
         setClockOffsetMs(new Date(result.server_time).getTime() - Date.now());
       }
     } catch (err) {
-      setError(err.message);
+      if (requestId === requestCounterRef.current) setError(err.message);
     } finally {
-      setLoaded(true);
+      if (requestId === requestCounterRef.current) setLoaded(true);
     }
   }
 
@@ -47,7 +115,7 @@ export function useJobList(limit, refreshSignal) {
     timerRef.current = setInterval(refresh, POLL_MS);
     return () => clearInterval(timerRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [limit]);
+  }, [fetchKey]);
 
   // A form submission (or a delete) bumps refreshSignal right after
   // succeeding so the change shows up immediately instead of waiting up
@@ -72,7 +140,41 @@ export function useJobList(limit, refreshSignal) {
     return () => clearInterval(interval);
   }, [anyActive, clockOffsetMs]);
 
+  return { jobs, total, loaded, error, setError, now, refresh };
+}
+
+// Used by JobsPanel.jsx (the small strip shown under every form): the
+// newest `limit` jobs from GET /v1/jobs.
+export function useJobList(limit, refreshSignal) {
+  const { jobs, loaded, error, setError, now, refresh } = usePolledJobs(() => listJobs(limit), limit, refreshSignal);
   return { jobs, loaded, error, setError, now, refresh };
+}
+
+// Used by JobHistory.jsx: one filtered page of jobs from POST /v1/jobs/search.
+// `filters` is { statuses, pipelines, source, cached, q } -- `cached` is
+// 'all' | 'cached' | 'uncached' and is the one filter the server can't
+// know (results are cached in this browser's IndexedDB), so it is turned
+// into a list of job ids on every fetch, which keeps the page following
+// the cache as results are added to it or evicted. Resolves `total` too,
+// the number of matching jobs across all pages.
+export function useJobSearch(filters, offset, limit) {
+  async function fetchPage() {
+    // An empty list of pipelines (the chosen model/media combination has no recipe) matches nothing.
+    if (filters.pipelines && filters.pipelines.length === 0) return { jobs: [], total: 0 };
+    const body = { offset, limit };
+    if (filters.statuses?.length) body.statuses = filters.statuses;
+    if (filters.pipelines) body.pipelines = filters.pipelines;
+    if (filters.source && filters.source !== 'all') body.source = filters.source;
+    if (filters.q) body.q = filters.q;
+    if (filters.cached === 'cached') {
+      body.job_ids = (await listCachedJobIds()).slice(0, MAX_FILTER_JOB_IDS);
+    } else if (filters.cached === 'uncached') {
+      body.exclude_job_ids = (await listCachedJobIds()).slice(0, MAX_FILTER_JOB_IDS);
+    }
+    return searchJobs(body);
+  }
+
+  return usePolledJobs(fetchPage, JSON.stringify({ filters, offset, limit }), undefined);
 }
 
 // Shared submit-a-job state machine used by every recipe form: tracks

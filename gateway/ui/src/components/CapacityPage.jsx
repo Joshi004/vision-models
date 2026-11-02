@@ -4,6 +4,7 @@ import Badge from './ui/Badge.jsx';
 import Button from './ui/Button.jsx';
 import Input from './ui/Input.jsx';
 import { useToast } from './ui/Toast.jsx';
+import { QUEUE_STATES } from '../utils.js';
 
 const POLL_MS = 10000;
 
@@ -50,6 +51,31 @@ function Count({ value }) {
   return <td className="px-2 py-2 text-right tabular-nums">{value > 0 ? value : <span className="text-muted">0</span>}</td>;
 }
 
+// A cell for something this kind of model does not have (for example warm workers of a one-shot model).
+function NotApplicable() {
+  return <td className="px-2 py-2 text-right text-muted">&mdash;</td>;
+}
+
+// One labelled number in a summary row.
+function Stat({ label, value, unit, tone = 'text-text', title }) {
+  return (
+    <div className="text-sm" title={title}>
+      <p className="text-muted">{label}</p>
+      <p className={`text-lg font-semibold tabular-nums ${tone}`}>
+        {value} {unit && <span className="text-sm font-normal text-muted">{unit}</span>}
+      </p>
+    </div>
+  );
+}
+
+function queuedFor(row, reason) {
+  return row.queued_by_reason?.[reason] ?? 0;
+}
+
+function sumOf(rows, pick) {
+  return rows.reduce((sum, row) => sum + (pick(row) ?? 0), 0);
+}
+
 // Where the global GPU limit and each model's job limit are changed. The limits live on the
 // server (no environment variables): saving applies them at once and never cancels a job that
 // is running. The per-model limits, each counted at its GPUs per job, may not add up to more
@@ -64,7 +90,7 @@ export default function CapacityPage() {
 
   if (!capacity) {
     return (
-      <section className="mx-auto max-w-4xl">
+      <section className="mx-auto max-w-6xl">
         <h2 className="text-lg font-semibold text-text">GPU capacity</h2>
         <p className="mt-2 text-sm text-muted">{error ? `Could not load the limits: ${error}` : 'Loading\u2026'}</p>
       </section>
@@ -113,7 +139,7 @@ export default function CapacityPage() {
   }
 
   return (
-    <section className="mx-auto flex max-w-4xl flex-col gap-5">
+    <section className="mx-auto flex max-w-6xl flex-col gap-5">
       <div>
         <h2 className="text-lg font-semibold text-text">GPU capacity</h2>
         <p className="text-sm text-muted">
@@ -139,19 +165,33 @@ export default function CapacityPage() {
               className="w-32"
             />
           </label>
-          <div className="text-sm">
-            <p className="text-muted">In use now</p>
-            <p className="text-lg font-semibold tabular-nums text-text">
-              {capacity.gpus_in_use} <span className="text-sm font-normal text-muted">of {capacity.global_gpus} GPUs</span>
-            </p>
-          </div>
-          <div className="text-sm">
-            <p className="text-muted">Planned by the limits below</p>
-            <p className={`text-lg font-semibold tabular-nums ${overPlan ? 'text-danger' : 'text-text'}`}>
-              {planned === null ? '\u2014' : planned}{' '}
-              <span className="text-sm font-normal text-muted">of {globalLimit ?? '\u2014'} GPUs</span>
-            </p>
-          </div>
+          <Stat
+            label="GPUs allocated"
+            value={capacity.gpus_allocated}
+            unit={`of ${capacity.global_gpus} GPUs`}
+            title="GPUs Slurm has given this service: running jobs, and workers or the Qwen3.8 server that have a GPU."
+          />
+          <Stat
+            label="GPUs pending in Slurm"
+            value={capacity.gpus_pending}
+            unit="GPUs"
+            tone={capacity.gpus_pending > 0 ? 'text-warning' : 'text-text'}
+            title="GPUs this service asked Slurm for that are not allocated yet. They already count toward the global limit."
+          />
+          <Stat
+            label="Counted toward the limit"
+            value={capacity.gpus_in_use}
+            unit={`of ${capacity.global_gpus} GPUs`}
+            title="Allocated plus pending."
+          />
+          <Stat
+            label="Planned by the limits below"
+            value={planned === null ? '\u2014' : planned}
+            unit={`of ${globalLimit ?? '\u2014'} GPUs`}
+            tone={overPlan ? 'text-danger' : 'text-text'}
+          />
+          <Stat label="Running jobs" value={capacity.running_jobs} />
+          <Stat label="Queued jobs" value={capacity.queued_jobs} />
         </div>
         {capacity.gpus_in_use > capacity.global_gpus && (
           <p className="mt-3 text-xs text-warning">
@@ -178,6 +218,123 @@ export default function CapacityPage() {
         </div>
       )}
 
+      <div className="rounded-lg border border-border bg-surface p-4">
+        <h3 className="text-sm font-semibold text-text">
+          Waiting jobs: {capacity.queued_jobs} <span className="font-normal text-muted">(why they are not running yet)</span>
+        </h3>
+        <ul className="mt-2 grid gap-x-8 gap-y-1 text-sm sm:grid-cols-2">
+          {QUEUE_STATES.map((state) => {
+            const count = capacity.queued_by_reason?.[state.key] ?? 0;
+            return (
+              <li key={state.key} className="flex items-baseline gap-2">
+                <span className={`w-8 text-right tabular-nums ${count > 0 ? 'font-semibold text-text' : 'text-muted'}`}>{count}</span>
+                <span className="text-text">{state.label}</span>
+                <span className="text-xs text-muted">{state.explain}</span>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+
+      <div className="overflow-x-auto rounded-lg border border-border bg-surface">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-xs text-muted">
+              <th rowSpan={2} className="px-3 py-2 text-left align-bottom font-medium">
+                Model
+              </th>
+              <th rowSpan={2} className="px-2 py-2 text-right align-bottom font-medium">
+                Running jobs
+              </th>
+              <th colSpan={QUEUE_STATES.length + 1} className="border-l border-border px-2 pt-2 text-center font-medium">
+                Waiting jobs, by reason
+              </th>
+              <th colSpan={4} className="border-l border-border px-2 pt-2 text-center font-medium">
+                Warm workers
+              </th>
+              <th colSpan={2} className="border-l border-border px-2 pt-2 text-center font-medium">
+                GPUs
+              </th>
+            </tr>
+            <tr className="border-b border-border text-xs text-muted">
+              {QUEUE_STATES.map((state, index) => (
+                <th
+                  key={state.key}
+                  title={state.explain}
+                  className={`px-2 py-2 text-right font-medium ${index === 0 ? 'border-l border-border' : ''}`}
+                >
+                  {state.short}
+                </th>
+              ))}
+              <th className="px-2 py-2 text-right font-medium">Total</th>
+              <th className="border-l border-border px-2 py-2 text-right font-medium">Busy</th>
+              <th className="px-2 py-2 text-right font-medium">Idle</th>
+              <th className="px-2 py-2 text-right font-medium" title="Workers whose Slurm job is waiting for a GPU">
+                Pending
+              </th>
+              <th className="px-2 py-2 text-right font-medium" title="Workers that have a GPU and are loading the model">
+                Loading
+              </th>
+              <th className="border-l border-border px-2 py-2 text-right font-medium" title="Allocated by Slurm">
+                Allocated
+              </th>
+              <th className="px-3 py-2 text-right font-medium" title="Asked of Slurm, not allocated yet">
+                Pending
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...limitModels, ...fixedModels].map((model) => (
+              <tr key={model.key} className="border-b border-border last:border-b-0">
+                <td className="px-3 py-2 text-text">{model.label}</td>
+                <Count value={model.running_jobs} />
+                {QUEUE_STATES.map((state) => (
+                  <Count key={state.key} value={queuedFor(model, state.key)} />
+                ))}
+                <td className="px-2 py-2 text-right font-medium tabular-nums text-text">{model.queued}</td>
+                {model.kind === 'pool' ? (
+                  <>
+                    <Count value={model.busy} />
+                    <Count value={model.idle} />
+                    <Count value={model.workers_pending} />
+                    <Count value={model.workers_loading} />
+                  </>
+                ) : (
+                  <>
+                    <NotApplicable />
+                    <NotApplicable />
+                    <NotApplicable />
+                    <NotApplicable />
+                  </>
+                )}
+                <Count value={model.gpus_allocated} />
+                <td className="px-3 py-2 text-right tabular-nums">
+                  {model.gpus_pending > 0 ? <span className="text-warning">{model.gpus_pending}</span> : <span className="text-muted">0</span>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
+            <tr className="border-t border-border bg-surface-2 font-medium text-text">
+              <td className="px-3 py-2">Total</td>
+              <td className="px-2 py-2 text-right tabular-nums">{capacity.running_jobs}</td>
+              {QUEUE_STATES.map((state) => (
+                <td key={state.key} className="px-2 py-2 text-right tabular-nums">
+                  {capacity.queued_by_reason?.[state.key] ?? 0}
+                </td>
+              ))}
+              <td className="px-2 py-2 text-right tabular-nums">{capacity.queued_jobs}</td>
+              <td className="px-2 py-2 text-right tabular-nums">{sumOf(capacity.models.filter((m) => m.kind === 'pool'), (m) => m.busy)}</td>
+              <td className="px-2 py-2 text-right tabular-nums">{sumOf(capacity.models.filter((m) => m.kind === 'pool'), (m) => m.idle)}</td>
+              <td className="px-2 py-2 text-right tabular-nums">{sumOf(capacity.models, (m) => m.workers_pending)}</td>
+              <td className="px-2 py-2 text-right tabular-nums">{sumOf(capacity.models, (m) => m.workers_loading)}</td>
+              <td className="px-2 py-2 text-right tabular-nums">{capacity.gpus_allocated}</td>
+              <td className="px-3 py-2 text-right tabular-nums">{capacity.gpus_pending}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+
       <div className="overflow-x-auto rounded-lg border border-border bg-surface">
         <table className="w-full text-sm">
           <thead>
@@ -185,11 +342,6 @@ export default function CapacityPage() {
               <th className="px-3 py-2 font-medium">Model</th>
               <th className="px-2 py-2 font-medium">Max jobs</th>
               <th className="px-2 py-2 text-right font-medium">GPUs per job</th>
-              <th className="px-2 py-2 text-right font-medium">Busy</th>
-              <th className="px-2 py-2 text-right font-medium">Idle</th>
-              <th className="px-2 py-2 text-right font-medium">Starting</th>
-              <th className="px-2 py-2 text-right font-medium">Waiting</th>
-              <th className="px-3 py-2 text-right font-medium">GPUs held</th>
             </tr>
           </thead>
           <tbody>
@@ -210,11 +362,6 @@ export default function CapacityPage() {
                   />
                 </td>
                 <td className="px-2 py-2 text-right tabular-nums text-muted">{model.planning_gpus}</td>
-                <Count value={model.busy} />
-                <Count value={model.idle} />
-                <Count value={model.starting} />
-                <Count value={model.queued} />
-                <td className="px-3 py-2 text-right tabular-nums text-text">{model.gpus_held}</td>
               </tr>
             ))}
             {fixedModels.map((model) => (
@@ -225,8 +372,6 @@ export default function CapacityPage() {
                 </td>
                 <td className="px-2 py-2 text-muted">&mdash;</td>
                 <td className="px-2 py-2 text-right tabular-nums text-muted">{model.planning_gpus}</td>
-                <td className="px-2 py-2" colSpan={4}></td>
-                <td className="px-3 py-2 text-right tabular-nums text-text">{model.gpus_held}</td>
               </tr>
             ))}
           </tbody>

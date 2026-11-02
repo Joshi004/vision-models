@@ -218,6 +218,19 @@ Qwen3.8 server's GPU; it can never be more than `global_gpus`.
 Per model: `busy`, `idle` and `starting` are warm workers; `queued` is requests waiting
 for a worker (or, for one-shot models, jobs waiting in Slurm); `busy` for a one-shot model
 is its running jobs. The cluster's own free GPUs are on `GET /v1/partitions`.
+
+Real usage: `gpus_in_use` splits into `gpus_allocated` (GPUs Slurm has given us) and
+`gpus_pending` (GPUs asked of Slurm that are not allocated yet; they count toward the limit
+already). Per model, `running_jobs` is the jobs running, `workers_pending` the workers whose
+Slurm job waits for a GPU and `workers_loading` the workers that have a GPU and are loading
+the model. `queued_by_reason` (per model and in total, with `queued_jobs` and `running_jobs`)
+counts the queued jobs by why they wait, the same value a queued job reports as `queue_state`:
+`scheduling` (not looked at yet), `model_limit` (the model is at its max jobs, or every request
+slot of the Qwen3.8 server is in use), `gpu_limit` (the global limit is reached), `priority` (a
+more urgent job of another model gets the free GPUs first), `slurm_pending` (waiting for Slurm to
+allocate GPUs) and `model_loading` (GPUs allocated, the worker or server is loading the model).
+Reasons are as of the last scheduling pass, a few seconds old at most. A model that runs one
+Slurm job per request only ever reports `slurm_pending`: it loads its model inside the job.
 """
 
 CAPACITY_UPDATE = """
@@ -266,6 +279,26 @@ once its data has been deleted -- its result was downloaded, or it failed --
 stays here as a minimal record: `request` is `{}`, `downloaded_at` is set once
 its result was downloaded, and a failed job keeps a one-line `error`. Every
 other job keeps its full `request`.
+"""
+
+JOB_SEARCH = """
+One page of the jobs that match the filters in the body, newest first, across every
+backend -- what `GET /v1/jobs` cannot do (it has no offset and no filters). Every
+entry has the same fields as in `GET /v1/jobs`.
+
+Every filter is optional and the ones given are combined with AND: `statuses`,
+`pipelines` (exact `<backend>:<recipe>` strings), `source` (`ui`, `api` or `unknown`),
+`job_ids` / `exclude_job_ids` (at most 10000 each), and `q` (text to find anywhere in
+the job id or the request's `prompt`, case-insensitive). Page with `offset` and `limit`
+(max 500); the response's `total` is the number of matching jobs across all pages.
+
+A page is a snapshot: a job submitted between two requests moves every older job one
+place down, so a row can appear on two pages, or be missed, when jobs are being
+submitted while you page through.
+
+`source` on each job tells who submitted it: `ui` when the request carried the header
+`X-Job-Source: ui` (the web UI sends it), `api` for any other client, null for jobs
+submitted before it was recorded. A label only, not authentication.
 """
 
 JOB_STATUS = """
@@ -485,6 +518,8 @@ UPLOAD_BY_HASH_RESPONSES = {
 }
 
 JOB_LIST_RESPONSES: dict[int, dict] = {}
+
+JOB_SEARCH_RESPONSES: dict[int, dict] = {}
 
 PARTITIONS_RESPONSES = {
     503: {

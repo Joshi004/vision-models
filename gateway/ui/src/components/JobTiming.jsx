@@ -1,4 +1,4 @@
-import { formatDuration } from '../utils.js';
+import { QUEUE_STATE_BY_KEY, formatDuration } from '../utils.js';
 
 // Friendly names for JobStage.name (common/schemas.py) -- currently only
 // wan-animate:replace jobs ever populate `progress.stages`, but this maps
@@ -55,7 +55,13 @@ function expectedRun(job) {
 export function JobTimingSummary({ job, now }) {
   if (job.status === 'queued') {
     const elapsed = secondsSince(job.created_at, now);
-    const waitingFor = job.gpus != null ? `${job.gpus} GPUs` : 'a GPU';
+    const queueState = QUEUE_STATE_BY_KEY[job.queue_state];
+    // An older server sends no queue_state: keep the plain wording.
+    const gpuText = job.gpus != null ? `${job.gpus} GPUs` : 'a GPU';
+    const waitingFor =
+      job.queue_state === 'slurm_pending' && job.gpus != null
+        ? `the cluster to allocate ${gpuText}`
+        : (queueState?.waitingFor ?? gpuText);
     const estimate =
       job.estimated_run_seconds != null ? ` \u2014 est. ~${formatDuration(job.estimated_run_seconds)} once started` : '';
     return (
@@ -125,6 +131,11 @@ export function JobTimingDetail({ job, now }) {
     <div className="flex flex-col gap-1.5 text-xs text-muted">
       <p>Submitted: {new Date(job.created_at).toLocaleString()}</p>
       {queueWaitSeconds != null && <p>Queue wait: {formatDuration(queueWaitSeconds) ?? '0s'}</p>}
+      {job.status === 'queued' && QUEUE_STATE_BY_KEY[job.queue_state] && (
+        <p>
+          Waiting because: {QUEUE_STATE_BY_KEY[job.queue_state].label}. {QUEUE_STATE_BY_KEY[job.queue_state].explain}
+        </p>
+      )}
 
       {job.progress?.stages?.length > 0 && (
         <ul className="flex flex-col gap-0.5">

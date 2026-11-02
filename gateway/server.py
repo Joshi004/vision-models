@@ -41,6 +41,7 @@ from common import (
     capacity,
     config,
     guide,
+    job_source,
     job_store,
     openapi_docs,
     partition_status,
@@ -58,7 +59,9 @@ from common.schemas import (
     HealthResponse,
     JobListItem,
     JobListResponse,
+    JobPageResponse,
     JobPriorityUpdate,
+    JobSearchRequest,
     JobStatusResponse,
     LipSyncResult,
     PartitionStatus,
@@ -137,7 +140,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="GPU Cluster Model-Serving API",
-    version="0.23.0",
+    version="0.25.0",
     description=openapi_docs.APP_DESCRIPTION,
     openapi_tags=openapi_docs.TAGS_METADATA,
     lifespan=lifespan,
@@ -172,6 +175,8 @@ class UploadSizeGuard:
 
 
 app.add_middleware(UploadSizeGuard)
+# Labels each request "ui" or "api" for job_store.create_job -- see common/job_source.py.
+app.add_middleware(job_source.JobSourceMiddleware)
 
 # Backend routers, each namespaced under its own prefix. Add future backends
 # (e.g. MAGI-2.2, Wan-Animate v2) the same way once their own
@@ -442,6 +447,20 @@ def _priority_editable(row: sqlite3.Row) -> bool:
     return worker_pool.pool_for_pipeline(row["pipeline"]) is not None or row["pipeline"].startswith("qwen38:")
 
 
+def _queue_state(row: sqlite3.Row) -> str | None:
+    """Why a queued job is not running yet (a capacity.QUEUE_* value); None for any other status.
+    A warm worker pool and Qwen3.8 know their own reason; every other backend hands the job to Slurm
+    at once, so a job of theirs that is still queued is waiting for Slurm to allocate its GPUs."""
+    if row["status"] != "queued":
+        return None
+    pool = worker_pool.pool_for_pipeline(row["pipeline"])
+    if pool is not None:
+        return pool.wait_reason(row["job_id"])
+    if row["pipeline"].startswith("qwen38:"):
+        return qwen38_dispatch.queue_state(row["job_id"])
+    return capacity.QUEUE_SLURM_PENDING
+
+
 def _row_to_status(row: sqlite3.Row, typical_cache: dict[str, tuple[float | None, str | None]]) -> JobStatusResponse:
     """Shared by job_status and list_jobs so both report the same fields the
     same way."""
@@ -475,6 +494,8 @@ def _row_to_status(row: sqlite3.Row, typical_cache: dict[str, tuple[float | None
         lip_sync=_lip_sync_result(row),
         priority=row["priority"],
         priority_editable=_priority_editable(row),
+        queue_state=_queue_state(row),
+        source=row["source"],
     )
 
 
@@ -496,6 +517,36 @@ def list_jobs(
     typical_cache: dict[str, tuple[float | None, str | None]] = {}
     jobs = [_row_to_list_item(row, typical_cache) for row in job_store.list_recent_jobs(limit)]
     return JobListResponse(jobs=jobs, server_time=datetime.now(timezone.utc).isoformat())
+
+
+@app.post(
+    "/v1/jobs/search",
+    tags=["Jobs"],
+    summary="Search jobs, one page at a time",
+    description=openapi_docs.JOB_SEARCH,
+    response_model=JobPageResponse,
+    responses=openapi_docs.JOB_SEARCH_RESPONSES,
+)
+def search_jobs(body: JobSearchRequest) -> JobPageResponse:
+    rows, total = job_store.search_jobs(
+        offset=body.offset,
+        limit=body.limit,
+        statuses=body.statuses,
+        pipelines=body.pipelines,
+        source=body.source,
+        job_ids=body.job_ids,
+        exclude_job_ids=body.exclude_job_ids,
+        q=body.q.strip() if body.q else None,
+    )
+    typical_cache: dict[str, tuple[float | None, str | None]] = {}
+    jobs = [_row_to_list_item(row, typical_cache) for row in rows]
+    return JobPageResponse(
+        jobs=jobs,
+        server_time=datetime.now(timezone.utc).isoformat(),
+        total=total,
+        offset=body.offset,
+        limit=body.limit,
+    )
 
 
 @app.get(

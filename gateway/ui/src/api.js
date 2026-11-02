@@ -63,11 +63,13 @@ export async function getJSON(path) {
 
 // Only ever used to submit a job (every recipe form goes through here), so
 // this is the one place the Incognito switch (see incognito.js) is applied:
-// while it is on, the request is sent with `incognito: true`.
+// while it is on, the request is sent with `incognito: true`. It also sends
+// `X-Job-Source: ui`, which is how the server records that the job came from
+// this web UI rather than from curl or an agent (see common/job_source.py).
 export async function postJSON(path, body) {
   const response = await request(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Job-Source': 'ui' },
     body: JSON.stringify({ ...body, incognito: getIncognito() }),
   });
   return response.json();
@@ -152,6 +154,18 @@ export function getOpenApi() {
 
 export function listJobs(limit = 50) {
   return getJSON(`/v1/jobs?limit=${limit}`);
+}
+
+// One filtered page of jobs (POST /v1/jobs/search) -- see JobHistory.jsx.
+// A plain POST, not postJSON: it is not a job submission, so it must not
+// carry `incognito` or `X-Job-Source`.
+export async function searchJobs(body) {
+  const response = await request('/v1/jobs/search', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return response.json();
 }
 
 // Names of every currently-installed RVC voice model -- see

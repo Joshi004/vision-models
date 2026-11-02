@@ -101,6 +101,22 @@ export async function hasCachedResult(jobId) {
   }
 }
 
+// The job ids of every cached result, as a keys-only read (no blob bytes
+// touched) -- what JobHistory.jsx sends to the server for its "Cached" /
+// "Not cached" filter. [] if the cache is unavailable.
+export async function listCachedJobIds() {
+  try {
+    const db = await openDb();
+    return await new Promise((resolve, reject) => {
+      const request = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).getAllKeys();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  } catch {
+    return [];
+  }
+}
+
 // The cached Blob for jobId, or null if it isn't cached (or the cache is
 // unavailable). The blob's own `.type` already carries its content type
 // (set when it was first constructed in api.js's fetchResultBlob), so

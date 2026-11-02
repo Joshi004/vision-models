@@ -7,7 +7,7 @@ bodies.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -153,6 +153,17 @@ class PartitionStatusResponse(BaseModel):
     )
 
 
+QueueState = Literal["scheduling", "model_limit", "gpu_limit", "priority", "slurm_pending", "model_loading"]
+_QUEUE_STATE_DOC = (
+    "'scheduling': the gateway has not looked at it yet. "
+    "'model_limit': its model is at its own max jobs (for Qwen3.8: every request slot of the server is in use). "
+    "'gpu_limit': the global GPU limit is reached. "
+    "'priority': a more urgent job of another model is waiting for the free GPUs first. "
+    "'slurm_pending': waiting for the cluster (Slurm) to allocate the GPUs. "
+    "'model_loading': GPUs are allocated and the worker or server is loading the model."
+)
+
+
 class CapacityModel(BaseModel):
     """One model's limit and usage -- one entry in the response from GET /v1/capacity."""
 
@@ -171,7 +182,21 @@ class CapacityModel(BaseModel):
         examples=[8],
     )
     planning_gpus: int = Field(..., description="GPUs one job is counted as when the limits are validated.", examples=[4])
-    gpus_held: int = Field(..., description="GPUs this model holds right now.", examples=[8])
+    gpus_held: int = Field(
+        ...,
+        description="GPUs this model holds right now, allocated or still pending in Slurm (what counts toward the global limit).",
+        examples=[8],
+    )
+    gpus_allocated: int = Field(..., description="Of `gpus_held`, the GPUs Slurm has allocated (jobs and workers running).", examples=[4])
+    gpus_pending: int = Field(..., description="Of `gpus_held`, the GPUs still waiting in Slurm for an allocation.", examples=[4])
+    running_jobs: int = Field(..., description="Jobs of this model running right now.", examples=[1])
+    workers_pending: int = Field(..., description="Workers whose Slurm job is still waiting for a GPU ('pool' only).", examples=[1])
+    workers_loading: int = Field(..., description="Workers that have a GPU and are loading the model ('pool' only).", examples=[0])
+    queued_by_reason: dict[str, int] = Field(
+        ...,
+        description=f"Queued jobs of this model, counted by why they wait (a `queue_state` value). {_QUEUE_STATE_DOC}",
+        examples=[{"slurm_pending": 1, "model_limit": 2}],
+    )
     busy: int = Field(..., description="Workers running a request ('pool'), or running jobs ('oneshot').", examples=[1])
     idle: int = Field(..., description="Warm workers waiting for a request.", examples=[0])
     starting: int = Field(..., description="Workers still starting or loading the model.", examples=[1])
@@ -187,6 +212,15 @@ class CapacityResponse(BaseModel):
         ...,
         description="What the per-model limits add up to (each job counted at its model's `planning_gpus`, plus the Qwen3.8 server). Never more than `global_gpus`.",
         examples=[28],
+    )
+    gpus_allocated: int = Field(..., description="Of `gpus_in_use`, the GPUs Slurm has allocated.", examples=[16])
+    gpus_pending: int = Field(..., description="Of `gpus_in_use`, the GPUs still waiting in Slurm for an allocation.", examples=[4])
+    running_jobs: int = Field(..., description="Jobs running right now, all models together.", examples=[4])
+    queued_jobs: int = Field(..., description="Jobs queued right now, all models together.", examples=[7])
+    queued_by_reason: dict[str, int] = Field(
+        ...,
+        description=f"Queued jobs of all models, counted by why they wait (a `queue_state` value). {_QUEUE_STATE_DOC}",
+        examples=[{"slurm_pending": 3, "model_limit": 4}],
     )
     models: list[CapacityModel] = Field(..., description="Every model with its limit and current usage.")
 
@@ -478,6 +512,11 @@ class JobStatusResponse(BaseModel):
         ),
         examples=[False],
     )
+    queue_state: QueueState | None = Field(
+        None,
+        description=f"Only while status='queued': why the job is not running yet, as of the last scheduling pass. {_QUEUE_STATE_DOC} Null for any other status.",
+        examples=["slurm_pending"],
+    )
     result_ready: bool = Field(
         False, description="True iff status='succeeded' and the output file is available for download right now."
     )
@@ -548,6 +587,15 @@ class JobStatusResponse(BaseModel):
             "lip sync and `lip_sync.error` says why."
         ),
     )
+    source: Literal["ui", "api"] | None = Field(
+        None,
+        description=(
+            "Who submitted the job: 'ui' if the request carried the header `X-Job-Source: ui` (the web UI "
+            "sends it), 'api' for any other client. Null for jobs submitted before this field existed. "
+            "A label only, not authentication: any client can send that header."
+        ),
+        examples=["api"],
+    )
 
 
 class JobListItem(JobStatusResponse):
@@ -576,6 +624,49 @@ class JobListResponse(BaseModel):
             "be skewed."
         ),
         examples=["2026-09-27T19:23:17.095881+00:00"],
+    )
+
+
+class JobPageResponse(JobListResponse):
+    """Response from POST /v1/jobs/search: one page of the jobs that match the filters."""
+
+    total: int = Field(..., description="How many jobs match the filters in all, across every page.", examples=[137])
+    offset: int = Field(..., description="Echoes the requested `offset`.", examples=[0])
+    limit: int = Field(..., description="Echoes the requested `limit`.", examples=[50])
+
+
+_JobIdList = list[Annotated[str, Field(max_length=64)]]
+
+
+class JobSearchRequest(BaseModel):
+    """Body of POST /v1/jobs/search. Every filter is optional; the ones given are combined with AND."""
+
+    offset: int = Field(0, ge=0, description="How many matching jobs to skip (newest first).", examples=[0])
+    limit: int = Field(50, ge=1, le=500, description="Page size.", examples=[50])
+    statuses: list[Literal["queued", "running", "succeeded", "failed"]] | None = Field(
+        None, max_length=4, description="Only jobs in one of these states."
+    )
+    pipelines: list[Annotated[str, Field(max_length=100)]] | None = Field(
+        None,
+        max_length=200,
+        description="Only jobs of one of these pipelines, each exactly as in `pipeline` (e.g. 'ltx:text-to-video').",
+    )
+    source: Literal["ui", "api", "unknown"] | None = Field(
+        None,
+        description="Only jobs submitted from the web UI ('ui'), by another client ('api'), or before `source` was recorded ('unknown').",
+    )
+    job_ids: _JobIdList | None = Field(
+        None,
+        max_length=10000,
+        description="Only these jobs (an empty list matches nothing). The web UI sends the jobs it has cached for its 'cached' filter.",
+    )
+    exclude_job_ids: _JobIdList | None = Field(
+        None, max_length=10000, description="Leave these jobs out (the web UI's 'not cached' filter)."
+    )
+    q: str | None = Field(
+        None,
+        max_length=200,
+        description="Text to find anywhere in the job id or the request's `prompt` (case-insensitive).",
     )
 
 

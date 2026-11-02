@@ -46,6 +46,22 @@ POOL = "pool"  # a warm-worker backend (common/worker_pool.py)
 ONESHOT = "oneshot"  # one Slurm job per request, 1 GPU each
 FIXED = "fixed"  # always the same GPUs while up, no limit of its own (the Qwen3.8 server)
 
+# Why a queued job is not running yet (one value per job; see queue_state in the job status API).
+QUEUE_SCHEDULING = "scheduling"  # the scheduler has not looked at it yet
+QUEUE_MODEL_LIMIT = "model_limit"  # the model is at its own max jobs (or the Qwen3.8 server's slots are all in use)
+QUEUE_GPU_LIMIT = "gpu_limit"  # the global GPU limit is reached
+QUEUE_PRIORITY = "priority"  # a more urgent job of another model gets the free GPUs first
+QUEUE_SLURM_PENDING = "slurm_pending"  # waiting for the cluster (Slurm) to allocate GPUs
+QUEUE_MODEL_LOADING = "model_loading"  # GPUs are allocated; the worker or server is loading the model
+QUEUE_REASONS = (
+    QUEUE_SCHEDULING,
+    QUEUE_MODEL_LIMIT,
+    QUEUE_GPU_LIMIT,
+    QUEUE_PRIORITY,
+    QUEUE_SLURM_PENDING,
+    QUEUE_MODEL_LOADING,
+)
+
 _SETTING_KEY = "capacity"
 
 
@@ -323,7 +339,7 @@ def oneshot_admission(key: str, job_dir: Path | None = None) -> Iterator[None]:
 
 
 def status() -> dict:
-    """The body of GET /v1/capacity: the limits, GPUs in use, and one row per model."""
+    """The body of GET /v1/capacity: the limits, GPUs in use, one row per model, and the totals."""
     counts = job_store.inflight_counts_by_pipeline()
     with _settings_lock:
         settings = _load_locked()
@@ -337,24 +353,48 @@ def status() -> dict:
             "kind": model.kind,
             "max_jobs": limits.get(model.key),
             "planning_gpus": model.planning_gpus,
-            "gpus_held": 0,
+            "gpus_held": 0,  # allocated + pending: what counts toward the global limit
+            "gpus_allocated": 0,  # GPUs Slurm has given us
+            "gpus_pending": 0,  # GPUs asked of Slurm that are not allocated yet
             "busy": 0,
             "idle": 0,
             "starting": 0,
+            "workers_pending": 0,  # workers whose Slurm job waits for a GPU
+            "workers_loading": 0,  # workers that have a GPU and are loading the model
+            "running_jobs": 0,
             "queued": 0,
+            "queued_by_reason": {},
         }
         if model.kind == ONESHOT:
+            # No queue of our own: a queued job is a Slurm job waiting for its GPUs.
             running, queued = _oneshot_jobs(model, counts)
-            row.update(gpus_held=(running + queued) * model.planning_gpus, busy=running, queued=queued)
+            row.update(
+                gpus_held=(running + queued) * model.planning_gpus,
+                gpus_allocated=running * model.planning_gpus,
+                gpus_pending=queued * model.planning_gpus,
+                busy=running,
+                running_jobs=running,
+                queued=queued,
+                queued_by_reason={QUEUE_SLURM_PENDING: queued} if queued else {},
+            )
         elif model.snapshot is not None:
             row.update(model.snapshot())
         elif model.gpus_held is not None:
             held = model.gpus_held()
-            row.update(gpus_held=held, busy=held)
+            row.update(gpus_held=held, gpus_allocated=held, busy=held)
         rows.append(row)
+    queued_by_reason: dict[str, int] = {}
+    for row in rows:
+        for reason, n in row["queued_by_reason"].items():
+            queued_by_reason[reason] = queued_by_reason.get(reason, 0) + n
     return {
         "global_gpus": total,
         "gpus_in_use": sum(row["gpus_held"] for row in rows),
+        "gpus_allocated": sum(row["gpus_allocated"] for row in rows),
+        "gpus_pending": sum(row["gpus_pending"] for row in rows),
         "planned_gpus": _planned_gpus(limits),
+        "running_jobs": sum(row["running_jobs"] for row in rows),
+        "queued_jobs": sum(row["queued"] for row in rows),
+        "queued_by_reason": queued_by_reason,
         "models": rows,
     }

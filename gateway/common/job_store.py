@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from common import config
+from common import config, job_source
 
 # Priority runs from 1 (most urgent) to 10 (least urgent); a request that names none gets 10.
 MIN_PRIORITY = 1
@@ -129,6 +129,12 @@ def init_db() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_uploads_sha256 ON uploads(sha256)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_dedup_key ON jobs(dedup_key)")
+        # `source`: "ui" or "api" -- who submitted the job (common/job_source.py); NULL for jobs
+        # created before it existed (shown as "unknown").
+        if "source" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN source TEXT")
+        # Backs the jobs list's ORDER BY created_at DESC (GET /v1/jobs, POST /v1/jobs/search).
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at)")
 
 
 # --- jobs --------------------------------------------------------------
@@ -154,7 +160,8 @@ def create_job(
     with _connect() as conn:
         conn.execute(
             "INSERT INTO jobs (job_id, pipeline, status, job_dir, partition, request_json, created_at, incognito, "
-            "gpus, estimated_run_seconds, dedup_key, priority) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "gpus, estimated_run_seconds, dedup_key, priority, source) "
+            "VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 job_id,
                 pipeline,
@@ -167,6 +174,7 @@ def create_job(
                 estimated_run_seconds,
                 dedup_key,
                 priority,
+                job_source.current_source(),
             ),
         )
 
@@ -300,6 +308,65 @@ def list_recent_jobs(limit: int) -> list[sqlite3.Row]:
     /v1/jobs (the web UI's job history), capped at `limit`."""
     with _connect() as conn:
         return conn.execute("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+
+
+def _escape_like(text: str) -> str:
+    """Make `text` match literally inside a LIKE pattern that uses ESCAPE '\\'."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def search_jobs(
+    *,
+    offset: int,
+    limit: int,
+    statuses: list[str] | None = None,
+    pipelines: list[str] | None = None,
+    source: str | None = None,
+    job_ids: list[str] | None = None,
+    exclude_job_ids: list[str] | None = None,
+    q: str | None = None,
+) -> tuple[list[sqlite3.Row], int]:
+    """One page of jobs, newest first, plus the total number of jobs matching the filters --
+    backs POST /v1/jobs/search. Every filter is optional; the ones given are combined with AND.
+    `source` is "ui", "api" or "unknown" (jobs created before `source` existed). `q` matches
+    anywhere in the job id or the request's prompt. All values are passed as query parameters,
+    never spliced into the SQL."""
+    clauses: list[str] = []
+    params: list[Any] = []
+
+    if statuses:
+        clauses.append(f"status IN ({','.join('?' * len(statuses))})")
+        params.extend(statuses)
+    if pipelines:
+        clauses.append(f"pipeline IN ({','.join('?' * len(pipelines))})")
+        params.extend(pipelines)
+    if source == "unknown":
+        clauses.append("source IS NULL")
+    elif source:
+        clauses.append("source = ?")
+        params.append(source)
+    if job_ids is not None:
+        # An empty list is a real filter ("only these jobs", and there are none): matches nothing.
+        clauses.append(f"job_id IN ({','.join('?' * len(job_ids))})")
+        params.extend(job_ids)
+    if exclude_job_ids:
+        clauses.append(f"job_id NOT IN ({','.join('?' * len(exclude_job_ids))})")
+        params.extend(exclude_job_ids)
+    if q:
+        pattern = f"%{_escape_like(q.lower())}%"
+        clauses.append(
+            "(lower(job_id) LIKE ? ESCAPE '\\' OR lower(COALESCE(json_extract(request_json, '$.prompt'), '')) LIKE ? ESCAPE '\\')"
+        )
+        params.extend([pattern, pattern])
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    with _connect() as conn:
+        total = int(conn.execute(f"SELECT COUNT(*) AS n FROM jobs {where}", params).fetchone()["n"])
+        rows = conn.execute(
+            f"SELECT * FROM jobs {where} ORDER BY created_at DESC, job_id LIMIT ? OFFSET ?",
+            [*params, limit, offset],
+        ).fetchall()
+    return rows, total
 
 
 def recent_run_seconds(pipeline: str, limit: int = 20) -> list[float]:

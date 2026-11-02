@@ -56,7 +56,9 @@ const GROUPS = [
 // is each recipe's own "<backend>:<recipe>" string, exactly as stored on
 // every job row (see services/*/dispatch.py's _dispatch/create_job calls)
 // -- Retry (handleRetry below) uses it to find which recipe/form a given
-// job.pipeline should reopen into.
+// job.pipeline should reopen into. `media` ('video' | 'audio' | 'image' |
+// 'text') is what the recipe's result file is, for JobHistory.jsx's Media
+// filter.
 const RECIPES = [
   {
     id: 'ltx-generate',
@@ -66,6 +68,7 @@ const RECIPES = [
     icon: FilmIcon,
     Component: TextToVideoForm,
     pipeline: 'ltx:text-to-video',
+    media: 'video',
   },
   {
     id: 'ltx-keyframe',
@@ -75,6 +78,7 @@ const RECIPES = [
     icon: LayersIcon,
     Component: KeyframeInterpolationForm,
     pipeline: 'ltx:keyframe-interpolation',
+    media: 'video',
   },
   {
     id: 'ltx-audio-to-video',
@@ -84,6 +88,7 @@ const RECIPES = [
     icon: WaveIcon,
     Component: AudioToVideoForm,
     pipeline: 'ltx:audio-to-video',
+    media: 'video',
   },
   {
     id: 'ltx-retake',
@@ -93,6 +98,7 @@ const RECIPES = [
     icon: RedoIcon,
     Component: RetakeForm,
     pipeline: 'ltx:retake',
+    media: 'video',
   },
   {
     id: 'ltx-text-to-audio',
@@ -102,6 +108,7 @@ const RECIPES = [
     icon: MusicIcon,
     Component: TextToAudioForm,
     pipeline: 'ltx:text-to-audio',
+    media: 'audio',
   },
   {
     id: 'ltx25-generate',
@@ -111,6 +118,7 @@ const RECIPES = [
     icon: FilmIcon,
     Component: Ltx25TextToVideoForm,
     pipeline: 'ltx25:text-to-video',
+    media: 'video',
   },
   {
     id: 'ltx25-interpolate',
@@ -120,6 +128,7 @@ const RECIPES = [
     icon: LayersIcon,
     Component: Ltx25InterpolateForm,
     pipeline: 'ltx25:interpolate',
+    media: 'video',
   },
   {
     id: 'ltx25-audio-to-video',
@@ -139,6 +148,7 @@ const RECIPES = [
       matchAudioLength: true,
     },
     pipeline: 'ltx25:audio-to-video',
+    media: 'video',
   },
   {
     id: 'ltx25-retake',
@@ -152,6 +162,7 @@ const RECIPES = [
     // forms/RetakeForm.jsx.
     formProps: { formId: 'ltx25-retake', model: 'Ltx25RetakeRequest', endpoint: '/v1/ltx25/videos/retake', title: 'Retake (LTX-2.5)' },
     pipeline: 'ltx25:retake',
+    media: 'video',
   },
   {
     id: 'h3-generate',
@@ -161,6 +172,7 @@ const RECIPES = [
     icon: FilmIcon,
     Component: H3GenerateForm,
     pipeline: 'h3:generate',
+    media: 'video',
   },
   {
     id: 'h3-audio-to-video',
@@ -170,6 +182,7 @@ const RECIPES = [
     icon: WaveIcon,
     Component: H3AudioToVideoForm,
     pipeline: 'h3:audio-to-video',
+    media: 'video',
   },
   {
     id: 'wan-replace',
@@ -179,6 +192,7 @@ const RECIPES = [
     icon: SwapUserIcon,
     Component: WanReplaceForm,
     pipeline: 'wan-animate:replace',
+    media: 'video',
   },
   {
     id: 'tbdub-lip-sync',
@@ -188,6 +202,7 @@ const RECIPES = [
     icon: WaveIcon,
     Component: LipSyncForm,
     pipeline: 'tbdub:lip-sync',
+    media: 'video',
   },
   {
     id: 'rvc-convert',
@@ -197,6 +212,7 @@ const RECIPES = [
     icon: MicIcon,
     Component: RvcConvertForm,
     pipeline: 'rvc:convert',
+    media: 'audio',
   },
   {
     id: 'rvc-batch',
@@ -206,6 +222,7 @@ const RECIPES = [
     icon: StackIcon,
     Component: RvcBatchForm,
     pipeline: 'rvc:batch-convert',
+    media: 'audio',
   },
   {
     id: 'parakeet-transcribe',
@@ -215,6 +232,7 @@ const RECIPES = [
     icon: TranscriptIcon,
     Component: TranscribeForm,
     pipeline: 'parakeet:transcribe',
+    media: 'text',
   },
   {
     id: 'breeze-synthesize',
@@ -224,6 +242,7 @@ const RECIPES = [
     icon: WaveIcon,
     Component: BreezeTtsForm,
     pipeline: 'breeze-tts:synthesize',
+    media: 'audio',
   },
   {
     id: 'qwen-image-generate',
@@ -233,6 +252,7 @@ const RECIPES = [
     icon: ImageIcon,
     Component: QwenImageGenerateForm,
     pipeline: 'qwen-image21:generate',
+    media: 'image',
   },
   {
     id: 'qwen-image-edit',
@@ -242,6 +262,7 @@ const RECIPES = [
     icon: ImageIcon,
     Component: QwenImageEditForm,
     pipeline: 'qwen-image21:edit',
+    media: 'image',
   },
   {
     id: 'qwen38-generate',
@@ -251,6 +272,7 @@ const RECIPES = [
     icon: TranscriptIcon,
     Component: Qwen38GenerateForm,
     pipeline: 'qwen38:generate',
+    media: 'text',
   },
   {
     id: 'ace-step-generate',
@@ -260,6 +282,7 @@ const RECIPES = [
     icon: MusicIcon,
     Component: AceStepGenerateForm,
     pipeline: 'ace-step15:generate',
+    media: 'audio',
   },
   {
     id: 'ace-step-cover',
@@ -269,6 +292,7 @@ const RECIPES = [
     icon: MusicIcon,
     Component: AceStepCoverForm,
     pipeline: 'ace-step15:cover',
+    media: 'audio',
   },
   {
     id: 'ace-step-repaint',
@@ -278,6 +302,7 @@ const RECIPES = [
     icon: MusicIcon,
     Component: AceStepRepaintForm,
     pipeline: 'ace-step15:repaint',
+    media: 'audio',
   },
   {
     id: 'yue2-generate',
@@ -287,6 +312,7 @@ const RECIPES = [
     icon: MusicIcon,
     Component: Yue2GenerateForm,
     pipeline: 'yue2:generate',
+    media: 'audio',
   },
   {
     id: 'yue2-cover',
@@ -296,6 +322,7 @@ const RECIPES = [
     icon: MusicIcon,
     Component: Yue2CoverForm,
     pipeline: 'yue2:cover',
+    media: 'audio',
   },
   {
     id: 'stable-audio3-generate',
@@ -305,6 +332,7 @@ const RECIPES = [
     icon: WaveIcon,
     Component: StableAudio3GenerateForm,
     pipeline: 'stable-audio3:generate',
+    media: 'audio',
   },
   {
     id: 'stable-audio3-transform',
@@ -314,6 +342,7 @@ const RECIPES = [
     icon: WaveIcon,
     Component: StableAudio3TransformForm,
     pipeline: 'stable-audio3:transform',
+    media: 'audio',
   },
   {
     id: 'stable-audio3-inpaint',
@@ -323,6 +352,7 @@ const RECIPES = [
     icon: WaveIcon,
     Component: StableAudio3InpaintForm,
     pipeline: 'stable-audio3:inpaint',
+    media: 'audio',
   },
   {
     id: 'stable-audio-open-generate',
@@ -332,6 +362,7 @@ const RECIPES = [
     icon: WaveIcon,
     Component: StableAudioOpenGenerateForm,
     pipeline: 'stable-audio-open:generate',
+    media: 'audio',
   },
   {
     id: 'stable-audio-open-transform',
@@ -341,6 +372,7 @@ const RECIPES = [
     icon: WaveIcon,
     Component: StableAudioOpenTransformForm,
     pipeline: 'stable-audio-open:transform',
+    media: 'audio',
   },
 ];
 
@@ -560,6 +592,8 @@ export default function App() {
               ) : showingHistory ? (
                 <div className="px-5 py-6 lg:px-10">
                   <JobHistory
+                    groups={GROUPS}
+                    recipes={RECIPES}
                     jobRetentionDays={health?.job_retention_days}
                     onRetry={handleRetry}
                     canRetry={canRetry}

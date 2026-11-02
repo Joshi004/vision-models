@@ -289,6 +289,9 @@ class WorkerPool:
         self._lock = threading.RLock()
         self._queue: list[PoolRequest] = []
         self._priority_of: dict[str, int] = {}  # job_id -> priority, as of the last _refresh_queue
+        # job_id -> why it still waits (a capacity.QUEUE_* value), rebuilt whole by every _schedule pass
+        # and only ever replaced, so wait_reason can read it without the lock.
+        self._wait_reasons: dict[str, str] = {}
         self._workers: dict[str, Worker] = {}
         self._gpus_held = 0  # GPUs of every worker in _workers; updated by _workers_changed
         self._start_failures = 0
@@ -318,21 +321,44 @@ class WorkerPool:
     def snapshot(self) -> dict:
         """The workers and queue of this pool, for GET /v1/capacity."""
         with self._lock:
-            busy = idle = starting = 0
+            busy = idle = pending = loading = 0
+            gpus_allocated = gpus_pending = 0
             for worker in self._workers.values():
+                if worker.squeue_state == "RUNNING":
+                    gpus_allocated += worker.gpus
+                else:
+                    gpus_pending += worker.gpus
                 if worker.is_starting():
-                    starting += 1
+                    if worker.squeue_state == "RUNNING":
+                        loading += 1
+                    else:
+                        pending += 1
                 elif worker.is_free():
                     idle += 1
                 else:
                     busy += 1
+            queued_by_reason: dict[str, int] = {}
+            for request in self._queue:
+                reason = self.wait_reason(request.job_id)
+                queued_by_reason[reason] = queued_by_reason.get(reason, 0) + 1
             return {
                 "gpus_held": self._gpus_held,
+                "gpus_allocated": gpus_allocated,
+                "gpus_pending": gpus_pending,
                 "busy": busy,
                 "idle": idle,
-                "starting": starting,
+                "starting": pending + loading,
+                "workers_pending": pending,
+                "workers_loading": loading,
+                "running_jobs": busy,
                 "queued": len(self._queue),
+                "queued_by_reason": queued_by_reason,
             }
+
+    def wait_reason(self, job_id: str) -> str:
+        """Why a queued request of this pool is not running yet (a capacity.QUEUE_* value), as of the
+        last scheduling pass. Takes no lock, so an API call never waits on a pass that is calling squeue."""
+        return self._wait_reasons.get(job_id, capacity.QUEUE_SCHEDULING)
 
     def enqueue(self, request: PoolRequest, job_dir: Path) -> None:
         """Queue a request whose job row and job folder already exist. Raises PoolError if no worker
@@ -565,10 +591,17 @@ class WorkerPool:
         now = time.time()
         self._refresh_queue()
         self._assign_to_free_workers(now, failures)
-        unserved = self._claim_starting_workers()
+        unserved, claimed = self._claim_starting_workers()
         self._trim_over_limit()
         gave_up_starting = False
         blocked_priority: int | None = None  # priority of the request that the global GPU limit holds back
+        # Why each request still waits (see wait_reason). One that has a worker on the way waits for
+        # Slurm to allocate it, or for it to load the model.
+        reasons: dict[str, str] = {
+            job_id: capacity.QUEUE_SLURM_PENDING if worker.squeue_state != "RUNNING" else capacity.QUEUE_MODEL_LOADING
+            for job_id, worker in claimed.items()
+        }
+        held_back_reason = capacity.QUEUE_SCHEDULING  # why the requests the loop below stops at wait
         for request in unserved:
             if self._start_failures >= MAX_START_FAILURES:
                 gave_up_starting = True
@@ -582,14 +615,18 @@ class WorkerPool:
                 continue
             priority = self._priority_of.get(request.job_id, job_store.DEFAULT_PRIORITY)
             if capacity.outranked(self.name, priority):
+                held_back_reason = capacity.QUEUE_PRIORITY
                 break  # a more urgent request of another model is waiting for GPUs: leave them to it
             if not self._make_room_for_worker():
+                held_back_reason = capacity.QUEUE_MODEL_LIMIT
                 break  # at this pool's limit and every worker is busy or still needed: wait
             if not self._reserve_gpus(request.gpus):
                 blocked_priority = priority
+                held_back_reason = capacity.QUEUE_GPU_LIMIT
                 break  # the service is at its global GPU limit: wait for GPUs to be freed
             try:
                 self._start_worker(request)
+                reasons[request.job_id] = capacity.QUEUE_SLURM_PENDING  # its new worker is not yet allocated
             except PoolError as e:
                 failures.append((request, str(e)))
             finally:
@@ -601,6 +638,8 @@ class WorkerPool:
         for request, _ in failures:
             if request in self._queue:
                 self._queue.remove(request)
+        # Every request still queued that has no reason of its own was held back where the loop stopped.
+        self._wait_reasons = {r.job_id: reasons.get(r.job_id, held_back_reason) for r in self._queue}
         self._stop_idle_workers(now)
         return failures
 
@@ -701,20 +740,23 @@ class WorkerPool:
             len(self._queue) - 1,
         )
 
-    def _claim_starting_workers(self) -> list[PoolRequest]:
+    def _claim_starting_workers(self) -> tuple[list[PoolRequest], dict[str, Worker]]:
         """Match every queued request with at most one worker that is still starting. Starting
-        workers nobody claimed are stopped. Returns the requests left without one."""
+        workers nobody claimed are stopped. Returns the requests left without one, and the worker
+        each of the others claimed (by job id)."""
         starting = [w for w in self._workers.values() if w.is_starting()]
         unserved: list[PoolRequest] = []
+        claims: dict[str, Worker] = {}
         for request in self._queue:
             claimed = next((w for w in starting if w.matches(request)), None)
             if claimed is None:
                 unserved.append(request)
             else:
                 starting.remove(claimed)
+                claims[request.job_id] = claimed
         for worker in starting:
             self._stop_worker(worker, "no request is waiting for it any more")
-        return unserved
+        return unserved, claims
 
     def _evict_idle_worker(self) -> bool:
         """At the cap: stop the longest-idle worker to make room. Only idle workers are candidates; at
