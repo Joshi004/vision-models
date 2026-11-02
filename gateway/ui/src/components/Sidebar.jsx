@@ -1,11 +1,20 @@
-import { HistoryIcon } from './icons.jsx';
+import { HistoryIcon, SettingsIcon } from './icons.jsx';
 
 // Left-hand recipe picker: a vertical, grouped list on wider screens (md
 // and up), collapsing into a single horizontally scrolling row of pills
 // on narrow ones -- same markup and state either way, just different
 // Tailwind classes per breakpoint, so there's exactly one mounted copy
 // (no duplicated state to keep in sync).
-export default function Sidebar({ groups, recipes, activeId, showingHistory, onSelectRecipe, onSelectHistory }) {
+export default function Sidebar({
+  groups,
+  recipes,
+  activeId,
+  showingHistory,
+  showingCapacity,
+  onSelectRecipe,
+  onSelectHistory,
+  onSelectCapacity,
+}) {
   function itemClass(isActive) {
     return `flex shrink-0 items-center gap-2 whitespace-nowrap rounded-md px-3 py-2 text-left text-sm transition-colors md:whitespace-normal ${
       isActive ? 'bg-accent text-white' : 'text-muted hover:bg-surface-2 hover:text-text'
@@ -27,7 +36,7 @@ export default function Sidebar({ groups, recipes, activeId, showingHistory, onS
             .filter((recipe) => recipe.group === group.id)
             .map((recipe) => {
               const RecipeIcon = recipe.icon;
-              const isActive = !showingHistory && recipe.id === activeId;
+              const isActive = !showingHistory && !showingCapacity && recipe.id === activeId;
               return (
                 <button key={recipe.id} type="button" onClick={() => onSelectRecipe(recipe)} className={itemClass(isActive)}>
                   <RecipeIcon className="h-4 w-4 shrink-0" />
@@ -41,6 +50,10 @@ export default function Sidebar({ groups, recipes, activeId, showingHistory, onS
         <button type="button" onClick={onSelectHistory} className={itemClass(showingHistory)}>
           <HistoryIcon className="h-4 w-4 shrink-0" />
           Job history
+        </button>
+        <button type="button" onClick={onSelectCapacity} className={itemClass(showingCapacity)}>
+          <SettingsIcon className="h-4 w-4 shrink-0" />
+          GPU capacity
         </button>
       </div>
     </nav>

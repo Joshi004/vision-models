@@ -105,8 +105,9 @@ JOB_TIME_LIMIT = os.environ.get("H3_API_TIME", "01:30:00")
 
 # ---------------------------------------------------------------------------
 # Warm workers (see common/worker_pool.py). A request is not given a Slurm job of
-# its own: up to MAX_WORKERS long-lived jobs (4 or 8 GPUs each, as sized) each run
-# queued requests one after another (models/h3/runner/worker.py). Only the first
+# its own: long-lived jobs (4 or 8 GPUs each, as sized) each run queued requests
+# one after another (models/h3/runner/worker.py); how many may run at once is
+# H3's limit on the GPU capacity page (common/capacity.py), not a setting here. Only the first
 # request on a worker pays for reading the checkpoints from shared storage; the
 # next ones find them in the node's page cache (about 6 minutes saved, see the
 # worker script). A worker with nothing to do for IDLE_MINUTES is stopped.
@@ -115,11 +116,8 @@ JOB_TIME_LIMIT = os.environ.get("H3_API_TIME", "01:30:00")
 # its own time limit (the sizer's, at most JOB_TIME_LIMIT); WORKER_TIME_LIMIT is
 # the Slurm time limit of a worker and must be longer than that.
 # ---------------------------------------------------------------------------
-MAX_WORKERS = int(os.environ.get("H3_MAX_WORKERS", "8"))
 IDLE_MINUTES = float(os.environ.get("H3_IDLE_MINUTES", "10"))
 WORKER_TIME_LIMIT = os.environ.get("H3_WORKER_TIME", "12:00:00")
-if MAX_WORKERS < 1:
-    raise RuntimeError("H3_MAX_WORKERS must be 1 or more.")
 
 # Optional diffusers attention backend for the transformer, e.g. "_flash_3_hub"
 # (FlashAttention-3 on Hopper, roughly 2x faster than the default per measurements
@@ -186,6 +184,10 @@ MIN_TIME_LIMIT_SECONDS = 30 * 60
 # server.py::_typical_run_seconds). Only used for jobs without their own estimate
 # (older jobs); a job sized by sizing.py carries `estimated_run_seconds` instead.
 TYPICAL_RUN_SECONDS = 20 * 60
+
+# Part of the key that recognises a repeated request (common/dedup.py). Change it by hand when the
+# weights or the generation code change what a request produces, so earlier results are not reused.
+RESULT_VERSION = "1"
 
 
 def job_time_limit_seconds() -> int:

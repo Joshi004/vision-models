@@ -20,7 +20,7 @@ import subprocess
 from pathlib import Path
 
 from common import config as common_config
-from common import job_store, retention, storage
+from common import capacity, job_store, retention, storage
 from common.slurm import resolve_partition
 from services.ltx import video_shape
 from services.ltx25 import config
@@ -38,18 +38,18 @@ class DispatchError(RuntimeError):
     """Could not submit the job (bad asset reference, sbatch failure, ...)."""
 
 
-class CapacityError(RuntimeError):
-    """Too many jobs already in flight (see common.config.MAX_INFLIGHT_JOBS)."""
+# No room under this backend's limit or the global GPU limit (common/capacity.py); the router
+# answers it with 429.
+CapacityError = capacity.CapacityError
+
+CAPACITY_KEY = "ltx25"
+capacity.register(
+    CAPACITY_KEY, "LTX-2.5", capacity.ONESHOT, default_max_jobs=4, pipeline_prefixes=("ltx25:",)
+)
 
 
 def _check_capacity() -> None:
-    if (
-        common_config.MAX_INFLIGHT_JOBS is not None
-        and job_store.count_inflight_jobs() >= common_config.MAX_INFLIGHT_JOBS
-    ):
-        raise CapacityError(
-            f"At capacity: {common_config.MAX_INFLIGHT_JOBS} job(s) already in flight. Try again shortly."
-        )
+    capacity.check_oneshot(CAPACITY_KEY)
 
 
 def _image_args(images: list) -> list[str]:
@@ -310,7 +310,8 @@ def _dispatch(pipeline: str, req, output_suffix: str, build_args, build_post_ste
     post_step = build_post_step(req, job_dir) if build_post_step else None
 
     job_dir.mkdir(parents=True)
-    job_store.create_job(job_id, pipeline, job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito)
+    with capacity.oneshot_admission(CAPACITY_KEY, job_dir):
+        job_store.create_job(job_id, pipeline, job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito)
     try:
         slurm_job_id = _submit_slurm_job(
             job_id, job_dir, module_args, output_path, partition, req.incognito, post_step

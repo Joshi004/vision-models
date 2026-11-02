@@ -37,8 +37,8 @@ inputs and `seed` on the same hardware.
 **Timing:** requests are run by long-lived GPU jobs, one per GPU, that load about 31 GB of weights once and then
 run requests one after another. A request that has to start one takes minutes (about 5 minutes to load, plus a slower
 first image), even in `fast` mode; a request that finds one already loaded and free starts at once and takes about
-the generation time (tens of seconds to a couple of minutes, more for edits with many references). Up to 8 run at
-once (operator setting `QWEN_IMAGE21_MAX_WORKERS`), so with many requests at once some wait `queued` for a free one;
+the generation time (tens of seconds to a couple of minutes, more for edits with many references). Only as many run at
+once as the operator's limit for this model allows (`GET /v1/capacity`), so with many requests at once some wait `queued` for a free one;
 a GPU job with nothing to do for 10 minutes is stopped (`QWEN_IMAGE21_IDLE_MINUTES`). `fast` and `quality` use
 different checkpoints and so different GPU jobs. Cancelling a request that is already running stops its GPU job, so
 the next request starts cold. No live progress (`progress` is always null).
@@ -46,3 +46,14 @@ the next request starts cold. No live progress (`progress` is always null).
 **License:** Qwen-Image-2.1 is under the **Qwen Research License -- non-commercial use only**. Commercial use
 needs a separate agreement with the model's authors. Whoever operates this deployment is responsible for how it
 is used; this API does not enforce that restriction itself.
+
+**Sending the same request again, and retries.** A request identical to an earlier one -- the same settings,
+including the seed, and the same uploaded file *content* (uploading the file again is fine) -- does not run a second
+time. The response carries the earlier job's `job_id` with `reused: true` and that job's current `status`, as long as
+that job is still queued or running, or succeeded and its result is still available. A failed job is never reused:
+sending its request again creates a new job. A request with `incognito: true` is never matched. A reused job is shared:
+`DELETE /v1/jobs/{job_id}` cancels it for everyone who was given it. If the GPU job running your request is lost (for
+example pre-empted), the request goes back in the queue under the same `job_id` -- `attempts` on
+`GET /v1/jobs/{job_id}` shows how many times it was started, at most 3 -- while a job that fails because of its own
+request (a model error) is not run again. So a client can fire its requests, and send them again after a timeout or a
+crash, without checking first whether they are already queued.

@@ -14,7 +14,24 @@ import Button from './ui/Button.jsx';
 // resultExtension below) -- unlike text-to-audio, it is not always .wav.
 // `breeze-tts:synthesize` always produces .wav (see
 // services/breeze_tts/dispatch.py).
-const AUDIO_PIPELINES = new Set(['ltx:text-to-audio', 'rvc:convert', 'breeze-tts:synthesize']);
+const AUDIO_PIPELINES = new Set([
+  'ltx:text-to-audio',
+  'rvc:convert',
+  'breeze-tts:synthesize',
+  'ace-step15:generate',
+  'ace-step15:cover',
+  'ace-step15:repaint',
+  'stable-audio-open:generate',
+  'stable-audio-open:transform',
+  'stable-audio3:generate',
+  'stable-audio3:transform',
+  'stable-audio3:inpaint',
+  'yue2:generate',
+  'yue2:cover',
+]);
+
+// The music backends always produce FLAC (see services/*/dispatch.py).
+const FLAC_PREFIXES = ['ace-step15:', 'stable-audio-open:', 'stable-audio3:', 'yue2:'];
 
 // Qwen-Image-2.1 results are PNG images (RGB, or RGBA when transparent) --
 // rendered with an <img> on a checkerboard so transparency is visible.
@@ -61,6 +78,7 @@ function resultExtension(pipeline, request) {
   if (isTranscriptPipeline(pipeline) || isLlmPipeline(pipeline)) return 'json';
   if (isImagePipeline(pipeline)) return 'png';
   if (pipeline === 'rvc:convert') return (request?.export_format || 'wav').toLowerCase();
+  if (FLAC_PREFIXES.some((prefix) => pipeline.startsWith(prefix))) return 'flac';
   if (isAudioPipeline(pipeline)) return 'wav';
   return 'mp4';
 }

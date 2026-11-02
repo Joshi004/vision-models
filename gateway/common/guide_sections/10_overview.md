@@ -17,3 +17,9 @@ mounted on this running server, not a fixed set that might drift from reality.
   `DELETE /v1/jobs/{job_id}`, `DELETE /v1/jobs/{job_id}/purge`).
 - Backend-specific: everything under that backend's own path prefix -- its request fields, its
   output format, and its own timing and limitations.
+
+**Choosing a music backend:** vocals, with exact tempo, key or length, or in many languages, or a restyled or repainted
+recording: `ace-step15`. The most natural full song with sung lyrics, or a cover that follows a melody score: `yue2`
+(weights are non-commercial). Instrumentals, long background music, stems, sound effects, extending or inpainting a
+clip, no vocals: `stable-audio3`. Short sound effects, foley and loops of up to 47 seconds: `stable-audio-open`. Each
+backend's section describes its own prompt format.

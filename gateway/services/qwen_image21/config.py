@@ -90,21 +90,23 @@ CPUS_PER_GPU = os.environ.get("QWEN_IMAGE21_CPUS", "8")
 JOB_TIME_LIMIT = os.environ.get("QWEN_IMAGE21_JOB_TIME", "00:30:00")
 TYPICAL_RUN_SECONDS = 300
 
+# Part of the key that recognises a repeated request (common/dedup.py). Change it by hand when the
+# weights or the generation code change what a request produces, so earlier results are not reused.
+RESULT_VERSION = "1"
+
 # ---------------------------------------------------------------------------
 # Warm workers (see common/worker_pool.py). Requests are not given a Slurm job
-# each: up to MAX_WORKERS long-lived jobs (one GPU each) load a checkpoint once
-# and serve queued requests one at a time. A worker with nothing to do for
+# each: long-lived jobs (one GPU each) load a checkpoint once and serve queued
+# requests one at a time; how many may run at once is this model's limit on the
+# GPU capacity page (common/capacity.py), not a setting here. A worker with nothing to do for
 # IDLE_MINUTES is stopped. Workers are separate for `fast` and `quality`
 # (different checkpoints). JOB_TIME_LIMIT above is now the longest one
 # request may run; WORKER_TIME_LIMIT is the Slurm time limit of a worker, and
 # must be longer than that.
 # ---------------------------------------------------------------------------
 WORKER_SCRIPT = QWEN_IMAGE21_PROJECT_ROOT / "runner" / "worker.py"
-MAX_WORKERS = int(os.environ.get("QWEN_IMAGE21_MAX_WORKERS", "8"))
 IDLE_MINUTES = float(os.environ.get("QWEN_IMAGE21_IDLE_MINUTES", "10"))
 WORKER_TIME_LIMIT = os.environ.get("QWEN_IMAGE21_WORKER_TIME", "12:00:00")
-if MAX_WORKERS < 1:
-    raise RuntimeError("QWEN_IMAGE21_MAX_WORKERS must be 1 or more.")
 
 
 def job_time_limit_seconds() -> int:

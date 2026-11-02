@@ -48,7 +48,7 @@ import subprocess
 from pathlib import Path
 
 from common import config as common_config
-from common import job_store, retention, storage
+from common import capacity, job_store, retention, storage
 from common.slurm import resolve_partition
 from services.rvc import config
 from services.rvc.schemas import BatchConvertRequest, BatchSource, ConvertRequest
@@ -58,8 +58,14 @@ class DispatchError(RuntimeError):
     """Could not submit the job (bad asset reference, sbatch failure, ...)."""
 
 
-class CapacityError(RuntimeError):
-    """Too many jobs already in flight (see common.config.MAX_INFLIGHT_JOBS)."""
+# No room under this backend's limit or the global GPU limit (common/capacity.py); the router
+# answers it with 429.
+CapacityError = capacity.CapacityError
+
+CAPACITY_KEY = "rvc"
+capacity.register(
+    CAPACITY_KEY, "RVC voice conversion", capacity.ONESHOT, default_max_jobs=4, pipeline_prefixes=("rvc:",)
+)
 
 
 class InputError(RuntimeError):
@@ -77,13 +83,7 @@ class InputError(RuntimeError):
 
 
 def _check_capacity() -> None:
-    if (
-        common_config.MAX_INFLIGHT_JOBS is not None
-        and job_store.count_inflight_jobs() >= common_config.MAX_INFLIGHT_JOBS
-    ):
-        raise CapacityError(
-            f"At capacity: {common_config.MAX_INFLIGHT_JOBS} job(s) already in flight. Try again shortly."
-        )
+    capacity.check_oneshot(CAPACITY_KEY)
 
 
 def _check_extension(path: Path) -> None:
@@ -266,7 +266,8 @@ def dispatch_convert(req: ConvertRequest) -> str:
     module_args = build_convert_args(req, job_dir, output_path)
 
     job_dir.mkdir(parents=True)
-    job_store.create_job(job_id, "rvc:convert", job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito)
+    with capacity.oneshot_admission(CAPACITY_KEY, job_dir):
+        job_store.create_job(job_id, "rvc:convert", job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito)
     try:
         slurm_job_id = _submit_slurm_job(
             job_id,
@@ -317,9 +318,10 @@ def dispatch_batch_convert(req: BatchConvertRequest) -> str:
 
     module_args = build_batch_convert_args(req, input_dir, work_dir, output_dir, output_path)
 
-    job_store.create_job(
-        job_id, "rvc:batch-convert", job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito
-    )
+    with capacity.oneshot_admission(CAPACITY_KEY, job_dir):
+        job_store.create_job(
+            job_id, "rvc:batch-convert", job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito
+        )
     try:
         slurm_job_id = _submit_slurm_job(
             job_id,

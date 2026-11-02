@@ -19,7 +19,7 @@ import subprocess
 from pathlib import Path
 
 from common import config as common_config
-from common import job_store, retention, storage
+from common import capacity, job_store, retention, storage
 from common.slurm import resolve_partition
 from services.wan_animate import config
 from services.wan_animate.schemas import ReplaceRequest
@@ -29,18 +29,18 @@ class DispatchError(RuntimeError):
     """Could not submit the job (bad asset reference, sbatch failure, ...)."""
 
 
-class CapacityError(RuntimeError):
-    """Too many jobs already in flight (see common.config.MAX_INFLIGHT_JOBS)."""
+# No room under this backend's limit or the global GPU limit (common/capacity.py); the router
+# answers it with 429.
+CapacityError = capacity.CapacityError
+
+CAPACITY_KEY = "wan_animate"
+capacity.register(
+    CAPACITY_KEY, "Wan-Animate v1", capacity.ONESHOT, default_max_jobs=4, pipeline_prefixes=("wan-animate:",)
+)
 
 
 def _check_capacity() -> None:
-    if (
-        common_config.MAX_INFLIGHT_JOBS is not None
-        and job_store.count_inflight_jobs() >= common_config.MAX_INFLIGHT_JOBS
-    ):
-        raise CapacityError(
-            f"At capacity: {common_config.MAX_INFLIGHT_JOBS} job(s) already in flight. Try again shortly."
-        )
+    capacity.check_oneshot(CAPACITY_KEY)
 
 
 def build_replace_args(req: ReplaceRequest, output_path: Path) -> list[str]:
@@ -114,9 +114,10 @@ def dispatch_replace(req: ReplaceRequest) -> str:
     script_args = build_replace_args(req, output_path)
 
     job_dir.mkdir(parents=True)
-    job_store.create_job(
-        job_id, "wan-animate:replace", job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito
-    )
+    with capacity.oneshot_admission(CAPACITY_KEY, job_dir):
+        job_store.create_job(
+            job_id, "wan-animate:replace", job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito
+        )
     try:
         slurm_job_id = _submit_slurm_job(job_id, job_dir, script_args, output_path, partition, req.incognito)
     except DispatchError:

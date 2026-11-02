@@ -69,11 +69,16 @@ JOB_RETENTION_DAYS = float(os.environ.get("MODEL_API_RETENTION_DAYS", "7"))
 # it was uploaded (covers a file uploaded and then never used, a rejected
 # submission, or the leftover of a job that has been purged or has expired).
 UNUSED_UPLOAD_TTL_MINUTES = float(os.environ.get("MODEL_API_UNUSED_UPLOAD_TTL_MINUTES", "60"))
-# Optional soft safety valve on concurrent Slurm jobs this service has in
-# flight at once, across every backend combined (job_store's inflight count
-# is global, not per-backend). Unset (default) = no cap.
-_max_inflight = os.environ.get("MODEL_API_MAX_INFLIGHT")
-MAX_INFLIGHT_JOBS = int(_max_inflight) if _max_inflight else None
+# How many GPUs the service may use in total, and how many jobs each model may
+# run at once, are not settings here: they are changed while the gateway runs
+# (the "GPU capacity" page, GET/PUT /v1/capacity) and kept in the job
+# database -- see common/capacity.py.
+# Most jobs that may be queued or running at once for ONE backend (a warm-pool
+# backend or Qwen3.8); a request beyond that is refused with 429.
+MAX_QUEUED_PER_BACKEND = int(os.environ.get("MODEL_API_MAX_QUEUED_PER_BACKEND", "1000"))
+# Most times one job is run in total: a job whose worker (or model server) was lost is
+# queued again until it has been tried this many times. Model errors are never retried.
+MAX_ATTEMPTS = int(os.environ.get("MODEL_API_MAX_ATTEMPTS", "3"))
 MAX_UPLOAD_BYTES = int(os.environ.get("MODEL_API_MAX_UPLOAD_MB", "2048")) * 1024 * 1024
 
 # ---------------------------------------------------------------------------

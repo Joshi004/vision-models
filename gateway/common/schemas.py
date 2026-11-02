@@ -118,6 +118,55 @@ class PartitionStatusResponse(BaseModel):
     )
 
 
+class CapacityModel(BaseModel):
+    """One model's limit and usage -- one entry in the response from GET /v1/capacity."""
+
+    key: str = Field(..., description="Id to use in a PUT /v1/capacity `max_jobs` entry.", examples=["h3"])
+    label: str = Field(..., description="Display name.", examples=["MiniMax H3"])
+    kind: Literal["pool", "oneshot", "fixed"] = Field(
+        ...,
+        description=(
+            "'pool': served by warm workers that load the model once. 'oneshot': one Slurm job per request. "
+            "'fixed': a single shared server with no limit of its own (Qwen3.8); its GPU still counts toward the global limit."
+        ),
+    )
+    max_jobs: int | None = Field(
+        None,
+        description="The most jobs of this model that run at once (for 'pool', also the most warm workers). Null for 'fixed'.",
+        examples=[8],
+    )
+    planning_gpus: int = Field(..., description="GPUs one job is counted as when the limits are validated.", examples=[4])
+    gpus_held: int = Field(..., description="GPUs this model holds right now.", examples=[8])
+    busy: int = Field(..., description="Workers running a request ('pool'), or running jobs ('oneshot').", examples=[1])
+    idle: int = Field(..., description="Warm workers waiting for a request.", examples=[0])
+    starting: int = Field(..., description="Workers still starting or loading the model.", examples=[1])
+    queued: int = Field(..., description="Requests waiting for a worker ('pool'), or jobs waiting in Slurm ('oneshot').", examples=[3])
+
+
+class CapacityResponse(BaseModel):
+    """Response from GET /v1/capacity and PUT /v1/capacity."""
+
+    global_gpus: int = Field(..., description="The most GPUs this service may hold at once, across every model.", examples=[30])
+    gpus_in_use: int = Field(..., description="GPUs held right now by all models together.", examples=[20])
+    planned_gpus: int = Field(
+        ...,
+        description="What the per-model limits add up to (each job counted at its model's `planning_gpus`, plus the Qwen3.8 server). Never more than `global_gpus`.",
+        examples=[28],
+    )
+    models: list[CapacityModel] = Field(..., description="Every model with its limit and current usage.")
+
+
+class CapacityUpdateRequest(BaseModel):
+    """Body of PUT /v1/capacity."""
+
+    global_gpus: int = Field(..., description="The new global GPU limit (1 or more).", examples=[30])
+    max_jobs: dict[str, int] = Field(
+        default_factory=dict,
+        description="New `max_jobs` (1 or more) for the models named here, by `key`; models not named keep their limit.",
+        examples=[{"h3": 4, "parakeet": 2}],
+    )
+
+
 class UploadResponse(BaseModel):
     """Response from POST /v1/uploads."""
 
@@ -130,7 +179,25 @@ class JobSubmitResponse(BaseModel):
     """Response from every generation endpoint, on every backend."""
 
     job_id: str = Field(..., description="Id to poll GET /v1/jobs/{job_id} and later download GET /v1/jobs/{job_id}/result.", examples=["6b54a0bd6cef4b04abe50a8f81f55a80"])
-    status: str = Field(..., description="Always 'queued' immediately after submission.", examples=["queued"])
+    status: str = Field(
+        ...,
+        description=(
+            "'queued' for a new job. When `reused` is true, the current status of the earlier job that was "
+            "found again: 'queued', 'running' or 'succeeded'."
+        ),
+        examples=["queued"],
+    )
+    reused: bool = Field(
+        False,
+        description=(
+            "True if no new job was created because an identical request (same settings, same uploaded file "
+            "content) from before is still queued or running, or has finished and its result is still "
+            "available; `job_id` is then that earlier job. Only the warm-pool backends do this, plus Qwen3.8 "
+            "for a request that carries the same Idempotency-Key header. Always false for a request with "
+            "`incognito: true`."
+        ),
+        examples=[False],
+    )
     gpus: int | None = Field(
         None,
         description=(
@@ -260,6 +327,16 @@ class JobStatusResponse(BaseModel):
             "tbdub:lip-sync",
             "h3:generate",
             "h3:audio-to-video",
+            "ace-step15:generate",
+            "ace-step15:cover",
+            "ace-step15:repaint",
+            "stable-audio-open:generate",
+            "stable-audio-open:transform",
+            "stable-audio3:generate",
+            "stable-audio3:transform",
+            "stable-audio3:inpaint",
+            "yue2:generate",
+            "yue2:cover",
         ],
     )
     status: Literal["queued", "running", "succeeded", "failed"] = Field(
@@ -356,6 +433,16 @@ class JobStatusResponse(BaseModel):
             "today); null for every other backend and for older jobs."
         ),
         examples=[805.0],
+    )
+    attempts: int = Field(
+        1,
+        description=(
+            "How many times this job has been started. It is above 1 when the model worker (or model "
+            "server) running it was lost, for example pre-empted, and the job was put in the queue again "
+            "under the same job_id. A job that fails because of its own request (a model error) is not "
+            "run again."
+        ),
+        examples=[1],
     )
     progress: JobProgress | None = Field(
         None,
@@ -472,12 +559,6 @@ class LimitFacts(BaseModel):
     job_retention_days: float = Field(
         ..., description="Finished jobs (and their output files) are deleted automatically this many days after they finish.", examples=[7.0]
     )
-    max_inflight_jobs: int | None = Field(
-        None,
-        description="Optional soft cap on jobs in flight across every backend at once. Null if this deployment has no fixed cap.",
-        examples=[None],
-    )
-
 
 class PollingFacts(BaseModel):
     """Recommended polling behavior for GET /v1/guide."""

@@ -57,8 +57,15 @@ limited to {config.MAX_PROMPT_CHARS:,} characters as a rough guard.
 a warm server answers a short request in a few seconds and generates about 75 tokens per second, so a 16,000-token
 reasoning answer takes about 3.5 minutes and a full {config.MAX_OUTPUT_TOKENS:,}-token one about 11; a cold start
 takes several minutes (queue, loading about 28 GiB of weights, one-time kernel compilation). The pre-emptible
-`background` partition can stop the server at any moment, which fails the requests in flight; the next request
-starts a new server.
+`background` partition can stop the server at any moment: the requests in flight are started again under the same
+`job_id` (up to 3 starts, see `attempts` on `GET /v1/jobs/{{job_id}}`), and a new server is started for them. The same
+happens to requests that were waiting or running when the gateway restarted.
+
+**Sending a request again safely:** answers are not repeatable, so requests are never recognised by their content.
+Send an `Idempotency-Key` header (any string you choose, for example a UUID) and a second `POST` with the same key
+returns the first job's `job_id` with `reused: true`, as long as that job is still queued or running, or succeeded and
+its answer is still available. A failed job is not reused. The same key with a different request gets 422. The key is
+ignored for `incognito` requests. `DELETE /v1/jobs/{{job_id}}` cancels a shared job for everyone who was given it.
 
 The `incognito` option works as everywhere else. The model server itself keeps no copy of your prompts or answers
 (request logging is off).

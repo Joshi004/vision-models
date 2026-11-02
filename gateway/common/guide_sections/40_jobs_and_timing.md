@@ -7,11 +7,12 @@ for no benefit.
 
 **Why "queued" can last a while:** most backends submit a new job to this cluster's job scheduler for
 every request. That job cold-starts by loading model weights from storage before it does any actual
-work, then releases its allocation afterward. Three backends keep GPU work running between requests
+work, then releases its allocation afterward. Several backends keep GPU work running between requests
 instead. The Qwen3.8 text model keeps one shared server running while it is in use and stops it after a
 period without requests: its requests are answered in seconds when the server is up, and a request that
 arrives while it is stopped stays `queued` for the several minutes the server takes to start.
-Qwen-Image-2.1 and MiniMax H3 keep a limited number of long-lived GPU jobs (at most 8 of each, stopped after 10
+Qwen-Image-2.1, MiniMax H3, the four music and audio backends, Parakeet and Breeze TTS keep a limited number of
+long-lived GPU jobs (by default at most 8 each for Qwen-Image-2.1 and H3 and 4 each for the others, stopped after 10
 idle minutes): a request that finds one free starts at once, and loads much faster than a cold start when its
 GPU job has run a request before; otherwise it stays `queued` until a GPU job has started or become free. On top of that cold start, a job can also sit genuinely queued for a while
 if the cluster is busy; that queue wait has no fixed upper bound. Budget at least several minutes
@@ -40,6 +41,16 @@ size, where the typical figure is the median of whatever ran before. Both are ro
 other backend reports `gpus` and `estimated_run_seconds` as `null`. Such a backend can also refuse a request
 that is valid but too big for its GPUs, with HTTP 422 and a sentence saying why, before anything is queued.
 
+**Automatic retries and repeated requests:** the backends that keep GPU jobs running between requests
+(Qwen-Image-2.1, MiniMax H3, the four music and audio backends, Parakeet and Breeze TTS) and the Qwen3.8 text model put a request back in
+the queue, under the same `job_id`, when the GPU job or model server running it is lost (for example
+pre-empted), up to 3 starts in total; `attempts` on a job's status says how many. A request that fails because of
+its own content is not run again. Those backends also recognise a request that is identical to an earlier one
+(same settings and seed, same uploaded file content) and answer with the earlier job's `job_id` and
+`reused: true` instead of running it again -- unless the earlier job failed, or the request has
+`incognito: true`. Qwen3.8 does this only for a request that carries the same `Idempotency-Key` header. A shared
+job is cancelled for everyone by `DELETE /v1/jobs/{job_id}`. Each backend's section has the details.
+
 **Live progress:** some backends report fine-grained progress (current stage, step, a rough ETA) in
 the `progress` field while `status` is `"running"`; every other backend simply reports
 `progress: null` for the whole run -- that's expected, not a sign anything is stuck. Check each
@@ -53,4 +64,9 @@ still references; this cannot be undone, and a queued/running job must be cancel
 {{retention_text}} Re-uploading the same file again produces a new, additional `asset_id` rather than
 deduplicating.
 
-**Concurrency:** {{max_inflight_line}}
+**Concurrency:** the operator limits how many GPUs this service uses in total and how many jobs of each
+model run at once; both can change at any time, and `GET /v1/capacity` shows them with current usage. A
+model served by warm workers (every backend except LTX-2.3, LTX-2.5, RVC, TBDub and Wan-Animate) accepts
+your request and keeps it `queued` until a slot is free. The five that run one Slurm job per request
+answer **429** when their own limit or the global GPU limit is reached: nothing was queued, retry shortly.
+Lowering a limit never cancels a job that is already running.

@@ -128,6 +128,22 @@ export function getPartitions() {
   return getJSON('/v1/partitions');
 }
 
+// The GPU capacity limits and what is using them -- see
+// components/CapacityPage.jsx, the only caller. putCapacity is not
+// postJSON: it is not a job submission, so it must not carry `incognito`.
+export function getCapacity() {
+  return getJSON('/v1/capacity');
+}
+
+export async function putCapacity(body) {
+  const response = await request('/v1/capacity', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return response.json();
+}
+
 // The same document /docs renders from -- component schemas (field
 // descriptions, required lists) come from here, see schema.js.
 export function getOpenApi() {

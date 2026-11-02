@@ -18,10 +18,17 @@
 # Restarting does not affect Slurm jobs already submitted: the new gateway
 # picks their status up from jobs.db.
 #
+# Settings file: <repo>/vision.env (git-ignored; copy vision.env.example) is loaded automatically when it exists, so no
+# `source` step is needed first. Its values replace variables of the same name already set in your shell. Use
+# VISION_ENV_FILE=/path/to/file to load another file instead.
+#
 # Env overrides:
 #   MODEL_API_HOST                        (default 0.0.0.0; the port is always 8012)
 #   MODEL_API_FALLBACK_PARTITION          (default "background")
-#   MODEL_API_MAX_INFLIGHT                (optional soft concurrency cap, global across backends)
+#   (How many GPUs the service may use, and how many jobs each model may run at once, are not environment settings:
+#   they are changed on the "GPU capacity" page of the web UI and kept in the job database.)
+#   MODEL_API_MAX_QUEUED_PER_BACKEND      (most queued or running jobs per warm-pool backend / Qwen3.8, default 1000)
+#   MODEL_API_MAX_ATTEMPTS                (most starts of one job whose worker was lost, default 3)
 #   MODEL_API_RETENTION_DAYS              (finished job cleanup, default 7; a request sent with "incognito": true is the
 #                                          exception: its inputs are deleted when its job ends, its result right after its
 #                                          first complete download, and it keeps no logs)
@@ -49,7 +56,6 @@
 #   QWEN_IMAGE21_BASE_DIR, QWEN_IMAGE21_TURBO_DIR     (default <data dir>/weights/qwen_image21/{base,turbo})
 #   QWEN_IMAGE21_MEM_PER_GPU, QWEN_IMAGE21_CPUS, QWEN_IMAGE21_JOB_TIME   (Qwen-Image-2.1 backend's own Slurm allocation shape;
 #                                                      JOB_TIME, default 00:30:00, is the longest one request may run)
-#   QWEN_IMAGE21_MAX_WORKERS                          (most warm image workers (1 GPU each) running at once; default 8)
 #   QWEN_IMAGE21_IDLE_MINUTES                         (stop a worker after this many minutes without a request; default 10)
 #   QWEN_IMAGE21_WORKER_TIME                          (Slurm time limit of a worker; default 12:00:00)
 #   QWEN_IMAGE21_MAX_PROMPT_CHARS                     (default 8000)
@@ -72,11 +78,18 @@
 #   H3_ROWS_PER_GPU, H3_MAX_ENCODER_TOKENS            (the limits a request is sized against: the most rows of the denoising sequence per
 #                                                      GPU (default 40000) and the most tokens for the text encoder (default 60000). Initial
 #                                                      guesses, to be refitted from the usage log, $VISION_DATA_DIR/metrics/h3_jobs.jsonl)
-#   H3_MAX_WORKERS                                    (most warm H3 workers (4 or 8 GPUs each) running at once; default 8)
 #   H3_IDLE_MINUTES                                   (stop a worker after this many minutes without a request; default 10)
 #   H3_WORKER_TIME                                    (Slurm time limit of a worker; default 12:00:00; must exceed H3_API_TIME)
 #   H3 jobs always denoise in "ulysses" mode (all GPUs compute every step); there is no H3_PARALLELISM setting any more.
 #   H3 settings above are read when the gateway starts, so restart the gateway to change them.
+#
+#   Music backends (docs/models/{ace_step15,stable_audio_open,stable_audio3,yue2}/README.md), each with its own warm workers
+#   (1 GPU each); these two settings per backend are passed on to the gateway:
+#   ACE_STEP15_*, STABLE_AUDIO_OPEN_*, STABLE_AUDIO3_*, YUE2_*  with the suffixes
+#     IDLE_MINUTES   (stop a worker after this many minutes without a request; default 10)
+#     WORKER_TIME    (Slurm time limit of a worker; default 12:00:00)
+#   Speech backends: PARAKEET_* and BREEZE_TTS_* take the same two settings, with the same defaults.
+#   How many workers each may run at once is set on the "GPU capacity" page, not here.
 #
 #   Qwen3.8 text backend (one shared vLLM server on one GPU, see docs/models/qwen38/README.md); every QWEN38_* variable
 #   you have set is passed on to the gateway:
@@ -92,6 +105,24 @@ set -euo pipefail
 
 API_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$API_DIR/.." && pwd)"
+
+# Load the operator settings file, if there is one (see vision.env.example). Its values replace
+# same-named variables already set in your shell. The names it assigns are remembered so that
+# every one of them is also handed to the gateway below: the tmux session does not reliably
+# inherit this shell's environment.
+ENV_FILE="${VISION_ENV_FILE:-$REPO_ROOT/vision.env}"
+ENV_FILE_EXPORTS=""
+if [ -f "$ENV_FILE" ]; then
+  echo "Loading settings from $ENV_FILE"
+  set -a
+  # shellcheck disable=SC1090
+  source "$ENV_FILE"
+  set +a
+  for name in $(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "$ENV_FILE" | tr -d '=' | sort -u); do
+    ENV_FILE_EXPORTS+="export $name=$(printf '%q' "${!name-}"); "
+  done
+fi
+
 DATA_DIR="${VISION_DATA_DIR:-$(dirname "$REPO_ROOT")/vision-data}"
 SESSION="model-api"
 PORT=8012
@@ -181,16 +212,16 @@ if port_in_use; then
   exit 1
 fi
 
-# QWEN38_* settings (Qwen3.8 text backend) and the warm-worker settings of the image and H3 backends
+# QWEN38_* settings (Qwen3.8 text backend) and the warm-worker settings of the image, H3, music and speech backends
 # are handed to the gateway as they are.
 QWEN38_EXPORTS=""
-for name in $(compgen -e | grep -E '^(QWEN38_.*|QWEN_IMAGE21_(MAX_WORKERS|IDLE_MINUTES|WORKER_TIME)|H3_(MAX_WORKERS|IDLE_MINUTES|WORKER_TIME))$' || true); do
+for name in $(compgen -e | grep -E '^(QWEN38_.*|QWEN_IMAGE21_(IDLE_MINUTES|WORKER_TIME)|H3_(IDLE_MINUTES|WORKER_TIME)|(ACE_STEP15|STABLE_AUDIO_OPEN|STABLE_AUDIO3|YUE2|PARAKEET|BREEZE_TTS)_(IDLE_MINUTES|WORKER_TIME))$' || true); do
   QWEN38_EXPORTS+="export $name=$(printf '%q' "${!name}"); "
 done
 
 # 3. Start, then wait for the health check.
 tmux new-session -d -s "$SESSION" \
-  "export VISION_DATA_DIR='$DATA_DIR'; $QWEN38_EXPORTS export H3_ATTENTION_BACKEND=$(printf '%q' "$H3_ATTENTION_BACKEND"); export H3_GPU_OPTIONS=$(printf '%q' "$H3_GPU_OPTIONS"); export H3_ROWS_PER_GPU=$(printf '%q' "$H3_ROWS_PER_GPU"); export H3_MAX_ENCODER_TOKENS=$(printf '%q' "$H3_MAX_ENCODER_TOKENS"); cd '$API_DIR' && '$DATA_DIR/envs/gateway/bin/uvicorn' server:app --host '$HOST' --port $PORT; exec bash"
+  "export VISION_DATA_DIR='$DATA_DIR'; $ENV_FILE_EXPORTS $QWEN38_EXPORTS export H3_ATTENTION_BACKEND=$(printf '%q' "$H3_ATTENTION_BACKEND"); export H3_GPU_OPTIONS=$(printf '%q' "$H3_GPU_OPTIONS"); export H3_ROWS_PER_GPU=$(printf '%q' "$H3_ROWS_PER_GPU"); export H3_MAX_ENCODER_TOKENS=$(printf '%q' "$H3_MAX_ENCODER_TOKENS"); cd '$API_DIR' && '$DATA_DIR/envs/gateway/bin/uvicorn' server:app --host '$HOST' --port $PORT; exec bash"
 echo "$THIS_NODE $PORT" > "$NODE_FILE"
 
 echo -n "Starting on $THIS_NODE:$PORT "

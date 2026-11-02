@@ -51,7 +51,11 @@ UPSTREAM_DIR = REPO_ROOT / "third_party" / "breeze-tts"
 INFER_SCRIPT = UPSTREAM_DIR / "infer.py"
 
 
-def _parse_args() -> argparse.Namespace:
+class SynthesizeError(RuntimeError):
+    """The request cannot be run (bad arguments, missing files, undecodable reference)."""
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model-dir", required=True, help="Local Breeze TTS 2 checkpoint directory.")
     parser.add_argument("--work-dir", required=True, help="Directory for the decoded reference.wav.")
@@ -62,26 +66,44 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ref-text")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--cfg-scale", type=float, default=1.0)
-    return parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def prepare(args: argparse.Namespace) -> Path | None:
+    """Check the arguments and decode the reference recording, if any. Returns the decoded
+    reference WAV (None without a reference). Raises SynthesizeError. Shared with the warm
+    worker (worker.py), which then runs the model in-process instead of through infer.py."""
+    if not Path(args.model_dir).is_dir():
+        raise SynthesizeError(f"model directory not found: {args.model_dir}")
+    if not args.text.strip():
+        raise SynthesizeError("--text is empty.")
+    has_ref_audio = bool(args.ref_audio_path)
+    has_ref_text = bool(args.ref_text and args.ref_text.strip())
+    if has_ref_audio != has_ref_text:
+        raise SynthesizeError("--ref-audio-path and --ref-text must be provided together.")
+    if not has_ref_audio:
+        return None
+    ref_source = Path(args.ref_audio_path)
+    if not ref_source.is_file():
+        raise SynthesizeError(f"reference audio not found: {ref_source}")
+    reference_wav = Path(args.work_dir) / "reference.wav"
+    print(f"Normalizing '{ref_source}' -> '{reference_wav}'...", flush=True)
+    try:
+        to_wav(ref_source, reference_wav)
+    except AudioDecodeError as error:
+        raise SynthesizeError(str(error)) from error
+    return reference_wav
 
 
 def main() -> int:
     args = _parse_args()
     model_dir = Path(args.model_dir)
-    work_dir = Path(args.work_dir)
     output_path = Path(args.output_path)
 
-    if not model_dir.is_dir():
-        print(f"ERROR: model directory not found: {model_dir}", file=sys.stderr)
-        return 1
-    if not args.text.strip():
-        print("ERROR: --text is empty.", file=sys.stderr)
-        return 1
-
-    has_ref_audio = bool(args.ref_audio_path)
-    has_ref_text = bool(args.ref_text and args.ref_text.strip())
-    if has_ref_audio != has_ref_text:
-        print("ERROR: --ref-audio-path and --ref-text must be provided together.", file=sys.stderr)
+    try:
+        reference_wav = prepare(args)
+    except SynthesizeError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
         return 1
 
     infer_argv = [
@@ -94,18 +116,7 @@ def main() -> int:
     if args.instruction and args.instruction.strip():
         infer_argv.append(f"--instruction={args.instruction}")
 
-    if has_ref_audio:
-        ref_source = Path(args.ref_audio_path)
-        if not ref_source.is_file():
-            print(f"ERROR: reference audio not found: {ref_source}", file=sys.stderr)
-            return 1
-        reference_wav = work_dir / "reference.wav"
-        print(f"Normalizing '{ref_source}' -> '{reference_wav}'...", flush=True)
-        try:
-            to_wav(ref_source, reference_wav)
-        except AudioDecodeError as error:
-            print(f"ERROR: {error}", file=sys.stderr)
-            return 1
+    if reference_wav is not None:
         infer_argv += [f"--ref-audio={reference_wav}", f"--ref-text={args.ref_text.strip()}"]
 
     print("argv:", infer_argv, flush=True)

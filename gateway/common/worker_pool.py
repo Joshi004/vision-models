@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from common import capacity
 from common import config as common_config
 from common import job_store, retention
 from common.slurm import cancel_slurm_job
@@ -211,6 +212,33 @@ def _squeue_job_state(slurm_job_id: str) -> str | None:
     return None
 
 
+def _result_on_disk(job_id: str) -> bool:
+    """True if the job already left its result or its failure marker, i.e. it is finished and the
+    poller (common/poller.py) will record that; such a job must never be run again."""
+    job_dir = common_config.JOBS_DIR / job_id
+    if (job_dir / ".failed").exists():
+        return True
+    try:
+        return Path((job_dir / "output_path.txt").read_text().strip()).exists()
+    except OSError:
+        return False
+
+
+def _load_request(job_dir: Path) -> "PoolRequest | None":
+    """The request that enqueue wrote into the job folder, or None if it cannot be read."""
+    data = _read_json(job_dir / _REQUEST_FILE)
+    try:
+        return PoolRequest(
+            job_id=data["job_id"],  # type: ignore[index]
+            key=data["key"],  # type: ignore[index]
+            partition=data["partition"],  # type: ignore[index]
+            gpus=int(data["gpus"]),  # type: ignore[index]
+            limit_seconds=int(data["limit_seconds"]),  # type: ignore[index]
+        )
+    except (TypeError, KeyError, ValueError):
+        return None
+
+
 def _log_tail(path: Path, max_lines: int = 15, max_chars: int = 1500) -> str:
     try:
         lines = [line for line in path.read_text(errors="replace").splitlines() if line.strip()]
@@ -228,6 +256,12 @@ class WorkerPool:
     build_sbatch_command(worker_id, worker_dir, key, partition, gpus) returns the whole `sbatch`
     command (including --parsable) that starts one worker; the worker must run
     models/common/pool_worker.py's loop on worker_dir.
+
+    The most workers (= the most jobs running at once) is not fixed here: it is the limit that
+    common/capacity.py holds for this pool's name, changeable while the gateway runs, and no
+    worker is started that would take the whole service past the global GPU limit.
+    `planning_gpus` is the GPUs one job is assumed to need when the limits are validated;
+    `default_max_jobs` is the limit before anyone has configured one.
     """
 
     # How long a worker may take to load its model once Slurm has started it. Generous: a cold
@@ -238,15 +272,16 @@ class WorkerPool:
         self,
         name: str,
         *,
+        label: str,
         pipelines: tuple[str, ...],
-        max_workers: int,
+        planning_gpus: int = 1,
+        default_max_jobs: int = 4,
         idle_seconds: float,
         worker_time_seconds: int,
         build_sbatch_command: Callable[[str, Path, str, str, int], list[str]],
     ) -> None:
         self.name = name
         self.pipelines = pipelines
-        self.max_workers = max(1, max_workers)
         self.idle_seconds = idle_seconds
         self.worker_time_seconds = worker_time_seconds
         self._build_sbatch_command = build_sbatch_command
@@ -254,11 +289,49 @@ class WorkerPool:
         self._lock = threading.RLock()
         self._queue: list[PoolRequest] = []
         self._workers: dict[str, Worker] = {}
+        self._gpus_held = 0  # GPUs of every worker in _workers; updated by _workers_changed
         self._start_failures = 0
         self._last_failure_log = ""
         _POOLS.append(self)
+        capacity.register(
+            name,
+            label,
+            capacity.POOL,
+            planning_gpus=planning_gpus,
+            default_max_jobs=default_max_jobs,
+            gpus_held=lambda: self._gpus_held,
+            snapshot=self.snapshot,
+        )
+
+    @property
+    def max_workers(self) -> int:
+        return capacity.max_jobs(self.name)
+
+    def _workers_changed(self) -> None:
+        """Call after every change to _workers: republishes the GPUs this pool holds (read by
+        common/capacity.py without taking this pool's lock)."""
+        self._gpus_held = sum(w.gpus for w in self._workers.values())
 
     # --- public ------------------------------------------------------------
+
+    def snapshot(self) -> dict:
+        """The workers and queue of this pool, for GET /v1/capacity."""
+        with self._lock:
+            busy = idle = starting = 0
+            for worker in self._workers.values():
+                if worker.is_starting():
+                    starting += 1
+                elif worker.is_free():
+                    idle += 1
+                else:
+                    busy += 1
+            return {
+                "gpus_held": self._gpus_held,
+                "busy": busy,
+                "idle": idle,
+                "starting": starting,
+                "queued": len(self._queue),
+            }
 
     def enqueue(self, request: PoolRequest, job_dir: Path) -> None:
         """Queue a request whose job row and job folder already exist. Raises PoolError if no worker
@@ -310,25 +383,35 @@ class WorkerPool:
             if self.dir.is_dir():
                 for worker_dir in sorted(self.dir.iterdir()):
                     self._recover_worker(worker_dir, states, now)
+            # A job given to a worker that no recovered worker is running any more (its worker ended
+            # while the gateway was down, or the gateway stopped between handing the job over and
+            # writing the worker's inbox) is queued again; the loop below then picks it up with
+            # the others. One that already left its result is left for the poller. A result that
+            # is only not yet visible over NFS would be run a second time: harmless, it rewrites
+            # the same output. A job folder without pool_request.json is a one-shot Slurm job
+            # submitted before this backend had a pool: the poller follows it through sacct.
+            held = {w.current_job for w in self._workers.values() if w.current_job}
+            for row in job_store.list_inflight_jobs():
+                if (
+                    row["pipeline"] in self.pipelines
+                    and row["slurm_job_id"]
+                    and row["job_id"] not in held
+                    and (Path(row["job_dir"]) / _REQUEST_FILE).exists()
+                ):
+                    if not _result_on_disk(row["job_id"]):
+                        self._requeue_lost_job(row["job_id"], "The model worker that had this request is gone.")
             queued = [
                 row
                 for row in job_store.list_inflight_jobs()
                 if row["pipeline"] in self.pipelines and row["status"] == "queued" and not row["slurm_job_id"]
             ]
             for row in sorted(queued, key=lambda r: r["created_at"]):
-                data = _read_json(Path(row["job_dir"]) / _REQUEST_FILE)
-                try:
-                    request = PoolRequest(
-                        job_id=data["job_id"],  # type: ignore[index]
-                        key=data["key"],  # type: ignore[index]
-                        partition=data["partition"],  # type: ignore[index]
-                        gpus=int(data["gpus"]),  # type: ignore[index]
-                        limit_seconds=int(data["limit_seconds"]),  # type: ignore[index]
-                    )
-                except (TypeError, KeyError, ValueError):
+                request = _load_request(Path(row["job_dir"]))
+                if request is None:
                     self._fail_job_id(row["job_id"], "The gateway restarted before this request was queued. Submit it again.")
                     continue
                 self._queue.append(request)
+            self._workers_changed()
             logger.info("Pool %s recovered %d worker(s) and %d queued request(s).", self.name, len(self._workers), len(self._queue))
             failures = self._schedule()
         for request, message in failures:
@@ -431,8 +514,23 @@ class WorkerPool:
                 worker.idle_since = None
 
     def _worker_gone(self, worker: Worker) -> None:
-        """A worker's Slurm job ended on its own (not stopped by us)."""
+        """A worker's Slurm job ended on its own (not stopped by us). The request it was running,
+        if any, was not at fault (a model error leaves a .failed marker and is final): it is queued
+        again, ahead of the others, until it has used up its attempts."""
         self._workers.pop(worker.worker_id, None)
+        self._workers_changed()
+        job_id = worker.current_job
+        if job_id is not None and not _result_on_disk(job_id):
+            last = _read_json(worker.dir / "state.json") or worker.state
+            reported_done = last.get("job_id") == job_id and last.get("state") in ("idle", "exiting")
+            if not reported_done:
+                request = self._requeue_lost_job(
+                    job_id,
+                    f"The model worker (Slurm job {worker.slurm_job_id}) ended while running this request "
+                    "(its node may have been pre-empted).",
+                )
+                if request is not None:
+                    self._queue.insert(0, request)
         if worker.ever_ready:
             logger.info("Pool %s: worker %s (Slurm job %s) ended.", self.name, worker.worker_id, worker.slurm_job_id)
             return
@@ -466,6 +564,7 @@ class WorkerPool:
         now = time.time()
         self._assign_to_free_workers(now, failures)
         unserved = self._claim_starting_workers()
+        self._trim_over_limit()
         gave_up_starting = False
         for request in unserved:
             if self._start_failures >= MAX_START_FAILURES:
@@ -478,12 +577,16 @@ class WorkerPool:
                     )
                 )
                 continue
-            if len(self._workers) >= self.max_workers and not self._evict_idle_worker():
-                break  # at the cap and every worker is busy or still needed: wait
+            if not self._make_room_for_worker():
+                break  # at this pool's limit and every worker is busy or still needed: wait
+            if not self._reserve_gpus(request.gpus):
+                break  # the service is at its global GPU limit: wait for GPUs to be freed
             try:
                 self._start_worker(request)
             except PoolError as e:
                 failures.append((request, str(e)))
+            finally:
+                capacity.release(request.gpus)
         if gave_up_starting:
             self._start_failures = 0  # the next request gets a fresh try
         for request, _ in failures:
@@ -492,10 +595,47 @@ class WorkerPool:
         self._stop_idle_workers(now)
         return failures
 
+    def _trim_over_limit(self) -> None:
+        """After a limit was lowered: stop workers that hold no request until this pool is back
+        within its own limit and the service within the global GPU limit. Idle workers go first
+        (longest idle first), then workers still starting (newest first). A worker that is running
+        a request is never touched: it finishes, and its GPUs are simply not reused until usage is
+        back under the limit."""
+
+        def over_limit() -> bool:
+            return len(self._workers) > self.max_workers or capacity.gpus_in_use() > capacity.global_gpus()
+
+        if not over_limit():
+            return
+        idle = sorted((w for w in self._workers.values() if w.is_free()), key=lambda w: w.idle_since or 0.0)
+        starting = sorted((w for w in self._workers.values() if w.is_starting()), key=lambda w: -w.submitted_at)
+        for worker in idle + starting:
+            if not over_limit():
+                return
+            self._stop_worker(worker, "a capacity limit was lowered")
+
+    def _make_room_for_worker(self) -> bool:
+        """True if this pool is below its own limit, stopping idle workers of other kinds to get
+        there if it is not (more than one if the limit was lowered). False if none can be stopped."""
+        while len(self._workers) >= self.max_workers:
+            if not self._evict_idle_worker():
+                return False
+        return True
+
+    def _reserve_gpus(self, gpus: int) -> bool:
+        """Take `gpus` from the global budget, stopping idle workers of this pool if that is what it
+        takes to make them fit. The caller releases the reservation once the worker is submitted."""
+        while not capacity.try_reserve(gpus):
+            if not self._evict_idle_worker():
+                return False
+        return True
+
     def _assign_to_free_workers(self, now: float, failures: list[tuple[PoolRequest, str]]) -> None:
+        # One query for the whole queue: with hundreds of waiting requests, a query each would be
+        # run every tick while holding the lock that new submissions need.
+        status_of = job_store.statuses([request.job_id for request in self._queue]) if self._queue else {}
         for request in list(self._queue):
-            row = job_store.get_job(request.job_id)
-            if row is None or row["status"] != "queued":
+            if status_of.get(request.job_id) != "queued":
                 self._queue.remove(request)  # cancelled or failed while it waited
                 continue
             candidates = sorted(
@@ -618,6 +758,7 @@ class WorkerPool:
             dir=worker_dir,
             submitted_at=now,
         )
+        self._workers_changed()
         logger.info(
             "Pool %s: started worker %s (Slurm job %s, %d GPU(s), partition %s, key %s); %d of %d.",
             self.name,
@@ -634,6 +775,25 @@ class WorkerPool:
         logger.info("Pool %s: stopping worker %s (Slurm job %s): %s.", self.name, worker.worker_id, worker.slurm_job_id, reason)
         cancel_slurm_job(worker.slurm_job_id)
         self._workers.pop(worker.worker_id, None)
+        self._workers_changed()
+
+    # --- queueing a lost request again ---------------------------------------
+
+    def _requeue_lost_job(self, job_id: str, reason: str) -> PoolRequest | None:
+        """The request of a job that was lost with its worker, ready to queue again; None if the job
+        is already finished, or it has used up its attempts (it is then failed with `reason`)."""
+        row = job_store.get_job(job_id)
+        if row is None or row["status"] not in ("queued", "running"):
+            return None
+        if not job_store.requeue(job_id):
+            self._fail_job_id(job_id, f"{reason} It was tried {row['attempts']} time(s); submit it again.")
+            return None
+        request = _load_request(common_config.JOBS_DIR / job_id)
+        if request is None:
+            self._fail_job_id(job_id, f"{reason} It could not be queued again; submit it again.")
+            return None
+        logger.info("Pool %s: job %s queued again (attempt %d): %s", self.name, job_id, row["attempts"] + 1, reason)
+        return request
 
     # --- failing requests --------------------------------------------------
 
@@ -667,5 +827,24 @@ def cancel_job(job_id: str, slurm_job_id: str | None) -> bool:
     return False
 
 
+def pool_for_pipeline(pipeline: str) -> WorkerPool | None:
+    """The pool that runs jobs of this pipeline (e.g. "h3:generate"), None if no pool does."""
+    for pool in _POOLS:
+        if pipeline in pool.pipelines:
+            return pool
+    return None
+
+
 def pools() -> list[WorkerPool]:
     return list(_POOLS)
+
+
+def pools_apply_now() -> None:
+    """Run one scheduling pass on every pool right away, instead of waiting for the next watch
+    loop tick: called after the capacity limits changed, so a raised limit starts queued requests
+    and a lowered one stops the idle workers that are over it at once. Blocking."""
+    for pool in _POOLS:
+        try:
+            pool.tick()
+        except Exception:
+            logger.exception("Pool %s check failed", pool.name)

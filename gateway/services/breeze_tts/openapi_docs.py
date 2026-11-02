@@ -49,10 +49,20 @@ several requests.
 `GET /v1/jobs/{{job_id}}/result`. The same inputs and `seed` give the same
 audio on the same hardware.
 
-**Timing:** each request is a one-shot GPU job. Loading the model dominates
-for short text (measured: ~20 s for a short sentence on a warm node, ~70 s on
-a cold node; ~170 s for a 1000-character passage on a cold node), so expect
-roughly one to three minutes end to end including queueing. No live progress: `progress` is always null.
+**Timing:** requests are run by a small number of long-lived GPU jobs that
+load the model once and synthesize one request after another; one with no
+request for 10 minutes is stopped. Loading the model dominates for short
+text, so a request that finds a loaded GPU job free is much faster than one
+that waits for a GPU job to start (measured when every request loaded the
+model itself: ~20 s for a short sentence on a warm node, ~70 s on a cold node,
+~170 s for a 1000-character passage on a cold node; on a loaded GPU job the
+loading part is skipped, not yet measured). No live progress: `progress` is always null.
+
+**Repeated requests:** an identical request (same text, settings, seed and
+reference file content) while the earlier job is queued, running or
+succeeded with its result still available returns that job's `job_id` with
+`reused: true` instead of running again; a request whose GPU job is lost is
+queued again under the same `job_id`. See the Breeze TTS section of `GET /v1/guide`.
 
 **License and responsible use:** the Breeze TTS 2 *weights and self-hosted
 outputs* are licensed for **research and non-commercial use only**. Only clone

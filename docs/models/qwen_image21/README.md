@@ -60,7 +60,7 @@ Everything runs with no CPU offload on one 80 GB GPU. The runner sets `PYTORCH_A
 
 ## Warm workers
 
-A request does not get a Slurm job of its own. The gateway keeps up to `QWEN_IMAGE21_MAX_WORKERS` (default 8) long-lived one-GPU
+A request does not get a Slurm job of its own. The gateway keeps up to its "max jobs" limit (GPU capacity page, default 8) long-lived one-GPU
 Slurm jobs (`runner/worker.py`, started and fed by `gateway/common/worker_pool.py`). A worker loads one checkpoint, then serves
 queued requests one at a time: `QwenImage21Pipeline` keeps no state between calls, so reuse is safe. The gateway is the only
 process that hands out work, by writing each request into the worker's folder under `$VISION_DATA_DIR/pools/qwen_image21/`.

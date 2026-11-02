@@ -13,8 +13,8 @@ job from output.json / .failed alone, which covers the case where this
 process dies between writing the file and updating the database.
 output_path.txt is written first for that reason.
 
-A task lives only as long as the gateway process: fail_orphaned_jobs() fails
-whatever a restart interrupted.
+A task lives only as long as the gateway process: resume_orphaned_jobs() starts
+again, from the request stored with the job, whatever a restart interrupted.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 
 from common import config as common_config
-from common import job_store, retention
+from common import capacity, dedup, job_store, retention
 from services.qwen38 import config, server_manager
 from services.qwen38.schemas import Qwen38GenerateRequest
 
@@ -35,23 +35,34 @@ logger = logging.getLogger("model-api.qwen38")
 
 PIPELINE = "qwen38:generate"
 
+# The one shared model server holds 1 GPU while it is up. It has no limit of its own on the
+# capacity page (how many requests it serves at once is fixed when it starts); its GPU still
+# counts toward the global limit.
+capacity.register("qwen38", "Qwen3.8 language model", capacity.FIXED, planning_gpus=1, gpus_held=server_manager.gpus_held)
+
 _tasks: dict[str, asyncio.Task] = {}
 _calls: dict[str, server_manager.ChatCall] = {}
 _semaphore: asyncio.Semaphore | None = None
 _loop: asyncio.AbstractEventLoop | None = None
 
+# Pause before a request whose server was lost tries again, so the pool of attempts is not
+# used up while the lost server is still being cleaned up.
+RETRY_DELAY_SECONDS = 10.0
+
 
 class CapacityError(RuntimeError):
-    """Too many jobs already in flight (see common.config.MAX_INFLIGHT_JOBS)."""
+    """Too many jobs already queued or running for this model (see common.config.MAX_QUEUED_PER_BACKEND)."""
+
+
+class IdempotencyConflict(RuntimeError):
+    """An Idempotency-Key that was already used for a different request."""
 
 
 def _check_capacity() -> None:
-    if (
-        common_config.MAX_INFLIGHT_JOBS is not None
-        and job_store.count_inflight_jobs() >= common_config.MAX_INFLIGHT_JOBS
-    ):
+    if job_store.count_inflight_for((PIPELINE,)) >= common_config.MAX_QUEUED_PER_BACKEND:
         raise CapacityError(
-            f"At capacity: {common_config.MAX_INFLIGHT_JOBS} job(s) already in flight. Try again shortly."
+            f"This model already has {common_config.MAX_QUEUED_PER_BACKEND} job(s) queued or running. "
+            "Try again shortly."
         )
 
 
@@ -132,15 +143,27 @@ async def _run(job_id: str, job_dir: Path, req: Qwen38GenerateRequest) -> None:
     server_manager.request_started()
     started = time.monotonic()
     try:
-        await asyncio.to_thread(server_manager.ensure_server)
-        await server_manager.wait_until_ready(config.STARTUP_TIMEOUT_SECONDS)
+        # Waiting for a free slot comes first: only the few requests that hold one wait for the server
+        # (which polls Slurm), however many more are queued behind them.
         async with _get_semaphore():
-            job_store.mark_running(job_id)
-            waited = time.monotonic() - started
-            call = server_manager.ChatCall()
-            _calls[job_id] = call
-            generation_started = time.monotonic()
-            answer = await asyncio.to_thread(call.run, build_payload(req))
+            while True:
+                await asyncio.to_thread(server_manager.ensure_server)
+                await server_manager.wait_until_ready(config.STARTUP_TIMEOUT_SECONDS)
+                job_store.mark_running(job_id)
+                waited = time.monotonic() - started
+                call = server_manager.ChatCall()
+                _calls[job_id] = call
+                generation_started = time.monotonic()
+                try:
+                    answer = await asyncio.to_thread(call.run, build_payload(req))
+                    break
+                except server_manager.ServerLost as e:
+                    # The server went away under the request: not its fault, so try again (a new
+                    # server is started if needed) until the attempts are used up.
+                    if not job_store.requeue(job_id):
+                        raise
+                    logger.warning("Qwen3.8 job %s: %s Trying again.", job_id, e)
+                    await asyncio.sleep(RETRY_DELAY_SECONDS)
             generation_seconds = time.monotonic() - generation_started
         _write_output(output_path, _build_result(req, answer, waited, generation_seconds))
         job_store.mark_succeeded(job_id, output_path)
@@ -162,27 +185,48 @@ async def _run(job_id: str, job_dir: Path, req: Qwen38GenerateRequest) -> None:
         server_manager.request_finished()
 
 
-async def submit_generate(req: Qwen38GenerateRequest) -> str:
-    """Validate capacity, create the job directory and row, and start the task. Returns the job id."""
-    _check_capacity()
-    job_id = job_store.new_id()
-    job_dir = common_config.JOBS_DIR / job_id
-    job_dir.mkdir(parents=True)
-    (job_dir / "output_path.txt").write_text(str(job_dir / "output.json"))
-    job_store.create_job(
-        job_id,
-        PIPELINE,
-        job_dir,
-        req.model_dump(mode="json"),
-        config.PARTITION or common_config.FALLBACK_PARTITION,
-        incognito=req.incognito,
-    )
+def _start_task(job_id: str, job_dir: Path, req: Qwen38GenerateRequest) -> None:
     global _loop
     _loop = asyncio.get_running_loop()
     task = _loop.create_task(_run(job_id, job_dir, req))
     _tasks[job_id] = task
     task.add_done_callback(lambda _t: _tasks.pop(job_id, None))
-    return job_id
+
+
+async def submit_generate(req: Qwen38GenerateRequest, client_key: str | None = None) -> dedup.Submission:
+    """Validate capacity, create the job directory and row, and start the task. Returns the submission.
+
+    Qwen3.8 answers are not repeatable, so a request is never matched by its content. With a
+    `client_key` (the Idempotency-Key header) an earlier request with the same key is found again
+    instead: its job is returned if it is still queued or running, or has succeeded and its answer
+    is still there. The same key with a different request is refused (IdempotencyConflict). A
+    request with `incognito: true` ignores the key."""
+    body = req.model_dump(mode="json")
+    dedup_key = dedup.idempotency_key(PIPELINE, client_key) if client_key and not req.incognito else None
+    job_id = job_store.new_id()
+    job_dir = common_config.JOBS_DIR / job_id
+    with dedup.lock:
+        if dedup_key is not None:
+            earlier_jobs = job_store.find_by_dedup_key(dedup_key)
+            if earlier_jobs and json.loads(earlier_jobs[0]["request_json"]) != body:
+                raise IdempotencyConflict("This Idempotency-Key was already used for a different request.")
+            earlier = dedup.pick_reusable(earlier_jobs)
+            if earlier is not None:
+                return dedup.reuse(earlier)
+        _check_capacity()
+        job_dir.mkdir(parents=True)
+        (job_dir / "output_path.txt").write_text(str(job_dir / "output.json"))
+        job_store.create_job(
+            job_id,
+            PIPELINE,
+            job_dir,
+            body,
+            config.PARTITION or common_config.FALLBACK_PARTITION,
+            incognito=req.incognito,
+            dedup_key=dedup_key,
+        )
+    _start_task(job_id, job_dir, req)
+    return dedup.Submission(job_id, "queued")
 
 
 def cancel(job_id: str) -> None:
@@ -197,14 +241,31 @@ def cancel(job_id: str) -> None:
         _loop.call_soon_threadsafe(task.cancel)
 
 
-def fail_orphaned_jobs() -> None:
+async def resume_orphaned_jobs() -> None:
     """At gateway start: a request that was still waiting or running died with the old process.
-    One whose output.json was already written is left for the poller to finish."""
-    for row in job_store.list_inflight_jobs():
-        if not row["pipeline"].startswith("qwen38:"):
+    Each is started again from the request stored with its job, in the order they were submitted.
+    One that was already running counts as another attempt, and fails once it has used them up;
+    one whose output.json was already written is left for the poller to finish."""
+    rows = [row for row in job_store.list_inflight_jobs() if row["pipeline"].startswith("qwen38:")]
+    for row in sorted(rows, key=lambda r: r["created_at"]):
+        job_id = row["job_id"]
+        job_dir = Path(row["job_dir"])
+        if (job_dir / "output.json").exists():
             continue
-        if (Path(row["job_dir"]) / "output.json").exists():
+        if row["status"] == "running" and not job_store.requeue(job_id):
+            _fail(
+                job_id,
+                job_dir,
+                f"The gateway restarted while this request was in progress, and it was already tried "
+                f"{row['attempts']} time(s). Submit it again.",
+            )
+            logger.info("Failed orphaned Qwen3.8 job %s (attempts used up)", job_id)
             continue
-        job_store.mark_failed(row["job_id"], "The gateway restarted while this request was in progress. Submit it again.")
-        retention.on_job_failed(row["job_id"])
-        logger.info("Failed orphaned Qwen3.8 job %s", row["job_id"])
+        try:
+            req = Qwen38GenerateRequest(**json.loads(row["request_json"]))
+        except Exception:
+            _fail(job_id, job_dir, "The gateway restarted and this request could not be read back. Submit it again.")
+            logger.exception("Could not resume Qwen3.8 job %s", job_id)
+            continue
+        _start_task(job_id, job_dir, req)
+        logger.info("Resumed Qwen3.8 job %s after a restart", job_id)

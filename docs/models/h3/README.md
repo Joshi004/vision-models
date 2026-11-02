@@ -163,7 +163,7 @@ Slurm job (N GPUs)  ->  run_h3.py (rank 0, g0: generation)
   (about 103k video tokens) ran out of memory in the first denoising step. `split_transformer` in `run_h3.py` moves blocks 25-49
   of the 50 onto the conditioning GPU once the encoder has exited, so each GPU holds about 31 GiB of weights and the blocks run
   one after another. Hooks carry the inputs of block 25 to the second GPU and the output of block 49 back.
-- **Warm workers.** A request does not get a Slurm job of its own. The gateway keeps up to `H3_MAX_WORKERS` (default 8)
+- **Warm workers.** A request does not get a Slurm job of its own. The gateway keeps up to H3's "max jobs" limit (GPU capacity page, default 8)
   long-lived Slurm jobs of 4 or 8 GPUs (`models/h3/runner/worker.py`, started and fed by `gateway/common/worker_pool.py`, the
   pool Qwen-Image-2.1 uses too). A worker holds its allocation and, for each request, runs the same `run_h3.py` command a
   cold job would run, so the runner is unchanged and **nothing stays loaded in a process**. What a second request saves is the
@@ -263,9 +263,9 @@ and writes the MP4). The upstream code is not vendored: it is the installed diff
 Operator settings (environment variables of the gateway process, see `gateway/run.sh` and `vision.env.example`; all are read when the
 gateway starts): `H3_MODEL_DIR`; `H3_GPU_OPTIONS` (`4,8`; `4` pins every job to four GPUs); `H3_ROWS_PER_GPU` (40000) and
 `H3_MAX_ENCODER_TOKENS` (60000), the limits a request is sized against; `H3_MEM` (256G for the whole job), `H3_CPUS_PER_GPU` (8) and
-`H3_API_TIME` (01:30:00, also the longest estimate a request may have); `H3_MAX_WORKERS` (8), `H3_IDLE_MINUTES` (10) and
+`H3_API_TIME` (01:30:00, also the longest estimate a request may have); `H3_IDLE_MINUTES` (10) and
 `H3_WORKER_TIME` (12:00:00, must exceed `H3_API_TIME`), the warm workers described above (`gateway/run.sh` passes these
-three on to the gateway); and `H3_ATTENTION_BACKEND` (`_flash_3_hub` when started with
+two on to the gateway; how many workers may run is H3's "max jobs" limit on the GPU capacity page); and `H3_ATTENTION_BACKEND` (`_flash_3_hub` when started with
 `gateway/run.sh`). There is no `H3_PARALLELISM` any more: jobs always use `ulysses`. The gateway environment now also needs Pillow and
 PyAV (`gateway/requirements.lock.txt`, the same pins as the `h3` environment) to read the uploaded files' headers.
 

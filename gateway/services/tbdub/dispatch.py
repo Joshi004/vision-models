@@ -28,7 +28,7 @@ import subprocess
 from pathlib import Path
 
 from common import config as common_config
-from common import job_store, retention, storage
+from common import capacity, job_store, retention, storage
 from common.slurm import resolve_partition
 from services.tbdub import config
 from services.tbdub.schemas import LipSyncRequest
@@ -38,8 +38,14 @@ class DispatchError(RuntimeError):
     """Could not submit the job (sbatch failure, ...)."""
 
 
-class CapacityError(RuntimeError):
-    """Too many jobs already in flight (see common.config.MAX_INFLIGHT_JOBS)."""
+# No room under this backend's limit or the global GPU limit (common/capacity.py); the router
+# answers it with 429.
+CapacityError = capacity.CapacityError
+
+CAPACITY_KEY = "tbdub"
+capacity.register(
+    CAPACITY_KEY, "TBDub lip sync", capacity.ONESHOT, default_max_jobs=4, pipeline_prefixes=("tbdub:",)
+)
 
 
 class InputError(RuntimeError):
@@ -57,13 +63,7 @@ class ConflictError(RuntimeError):
 
 
 def _check_capacity() -> None:
-    if (
-        common_config.MAX_INFLIGHT_JOBS is not None
-        and job_store.count_inflight_jobs() >= common_config.MAX_INFLIGHT_JOBS
-    ):
-        raise CapacityError(
-            f"At capacity: {common_config.MAX_INFLIGHT_JOBS} job(s) already in flight. Try again shortly."
-        )
+    capacity.check_oneshot(CAPACITY_KEY)
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +253,8 @@ def dispatch_lip_sync(req: LipSyncRequest) -> str:
         audio_cfg_scale=req.audio_cfg_scale,
         ref_cfg_scale=req.ref_cfg_scale,
     )
-    job_store.create_job(job_id, "tbdub:lip-sync", job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito)
+    with capacity.oneshot_admission(CAPACITY_KEY, job_dir):
+        job_store.create_job(job_id, "tbdub:lip-sync", job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito)
     try:
         slurm_job_id = _submit_slurm_job(job_id, job_dir, argv, output_path, partition, req.incognito)
     except DispatchError:

@@ -46,6 +46,10 @@ TAGS_METADATA = [
         "description": "Endpoints that produce audio only, no video. Grouped under each backend's own path prefix.",
     },
     {
+        "name": "Music generation",
+        "description": "Generate music and sound: full songs with vocals (ACE-Step 1.5, YuE2), instrumentals, stems and sound effects (Stable Audio 3, Stable Audio Open 1.0), plus cover, repaint, transform and inpaint of an existing recording. One path prefix per model; see GET /v1/guide for which model to pick.",
+    },
+    {
         "name": "Lip sync",
         "description": "Redraw the speaker's mouth in an existing video to match an audio track exactly (TBDub). Also available as a `lip_sync` option on the LTX audio-to-video endpoints.",
     },
@@ -141,7 +145,8 @@ reference from any generation request (on any backend) that needs it. One
 file per call.
 
 Limit: {guide.STATIC_FACTS['upload_mb']} MB. {guide.STATIC_FACTS['upload_retention_text']} Re-uploading
-the same file again produces a new, additional `asset_id` rather than deduplicating.
+the same file again produces a new, additional `asset_id`, but a backend that recognises repeated requests (see
+"Sending the same request again" in its section of the guide) compares the file's content, not the `asset_id`.
 
 Image format note: images are decoded and forced to RGB (the first 3 channels of
 whatever `PIL.Image.open()` returns) -- plain grayscale or palette-mode images
@@ -167,6 +172,51 @@ every other partition counts GPUs the pre-emptible partition's own jobs are
 currently using there -- GPUs a job submitted to that other, higher-priority
 partition could take over immediately by pre-empting them.
 """
+
+CAPACITY = """
+The GPU capacity limits of this service and what is using them right now.
+
+`global_gpus` is the most GPUs the service may hold at once, across every model.
+Each model also has `max_jobs`, the most jobs of that model that run at once (for a
+model served by warm workers, also the most warm workers it keeps). `gpus_in_use` is
+what is held now: warm workers (starting, idle or busy), queued or running jobs of the
+models that run one Slurm job per request, and the Qwen3.8 server while it is up.
+`planned_gpus` is what the per-model limits add up to, counting each job of a model as
+`planning_gpus` (4 for H3, whose jobs use 4 or 8 GPUs; 1 for the others) plus the
+Qwen3.8 server's GPU; it can never be more than `global_gpus`.
+
+Per model: `busy`, `idle` and `starting` are warm workers; `queued` is requests waiting
+for a worker (or, for one-shot models, jobs waiting in Slurm); `busy` for a one-shot model
+is its running jobs. The cluster's own free GPUs are on `GET /v1/partitions`.
+"""
+
+CAPACITY_UPDATE = """
+Change the limits. `global_gpus` is required; `max_jobs` names only the models to change
+(model `key`s as returned by `GET /v1/capacity`) and leaves the others as they are.
+
+Takes effect at once and never cancels a running job. Raising a limit starts queued
+requests right away. Lowering one stops no job: workers that are busy finish their
+request, idle (and still-starting) workers above the new limit are stopped, and no new
+worker starts until usage is back under the limit.
+
+Rejected with 422, changing nothing, if a limit is below 1, a model is unknown, or the
+per-model limits (each counted at its `planning_gpus` per job) add up to more than
+`global_gpus`. Returns the same body as `GET /v1/capacity`.
+"""
+
+CAPACITY_RESPONSES = {
+    422: {
+        "description": "A limit is below 1, a model key is unknown, or the per-model limits add up to more than the global GPU limit.",
+        "content": {
+            "application/json": {
+                "example": {
+                    "detail": "The per-model limits add up to 40 GPUs (MiniMax H3 counts 4 GPUs per job), which is "
+                    "more than the global limit of 30. Lower a model's limit or raise the global limit."
+                }
+            }
+        },
+    },
+}
 
 JOB_LIST = """
 The most recently submitted jobs first, across every backend, capped at
@@ -254,6 +304,9 @@ than an error -- safe to call even if you're unsure of the current status. A
 cancelled job subsequently reports `status: "failed"`, not a distinct
 "cancelled" status.
 
+A job can be shared: when a backend recognised a request as a repeat of an earlier one, it returned that
+earlier job's `job_id` (`reused: true`), and cancelling it cancels it for everyone who was given that `job_id`.
+
 This only stops the job -- it doesn't delete anything. See
 `DELETE /v1/jobs/{job_id}/purge` to permanently remove a finished job's files
 and database row.
@@ -315,9 +368,15 @@ _ASSET_ERROR_RESPONSE = {
 
 _CAPACITY_RESPONSE = {
     429: {
-        "description": "The optional soft concurrency cap (MODEL_API_MAX_INFLIGHT) was reached; unset by default.",
+        "description": (
+            "A GPU capacity limit was reached: this model's own limit on jobs, or the service's global GPU "
+            "limit (both are set on the GPU capacity page, GET/PUT /v1/capacity), or the model's queue is "
+            "full. Nothing was queued; retry shortly."
+        ),
         "content": {
-            "application/json": {"example": {"detail": "At capacity: 4 job(s) already in flight. Try again shortly."}}
+            "application/json": {
+                "example": {"detail": "GPU capacity limit reached: 30 of 30 GPU(s) in use. Try again shortly."}
+            }
         },
     },
 }

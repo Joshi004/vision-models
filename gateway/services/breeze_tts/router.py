@@ -31,7 +31,7 @@ def synthesize(
     req: Annotated[SynthesizeRequest, Body(openapi_examples=breeze_docs.SYNTHESIZE_EXAMPLES)],
 ) -> JobSubmitResponse:
     try:
-        job_id = dispatch.dispatch_synthesize(req)
+        submission = dispatch.dispatch_synthesize(req)
     except dispatch.CapacityError as e:
         raise HTTPException(429, str(e)) from e
     except dispatch.InputError as e:
@@ -40,4 +40,4 @@ def synthesize(
         raise HTTPException(400, f"Invalid asset reference: {e}") from e
     except dispatch.DispatchError as e:
         raise HTTPException(502, f"Could not submit Slurm job: {e}") from e
-    return JobSubmitResponse(job_id=job_id, status="queued")
+    return JobSubmitResponse(job_id=submission.job_id, status=submission.status, reused=submission.reused)

@@ -34,7 +34,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from common import config, job_store, retention
+from common import config, job_store, retention, worker_pool
 from services.h3 import usage_log as h3_usage_log
 
 logger = logging.getLogger("model-api.poller")
@@ -124,6 +124,12 @@ def _check_one(row: sqlite3.Row) -> None:
     job_id = row["job_id"]
     job_dir = Path(row["job_dir"])
 
+    # A job of a warm pool (common/worker_pool.py) that has no Slurm job yet is waiting in the
+    # pool's queue: it cannot have finished, so there is nothing to look at.
+    pool = worker_pool.pool_for_pipeline(row["pipeline"])
+    if pool is not None and not row["slurm_job_id"]:
+        return
+
     expected_output = _expected_output_path(job_dir)
     if expected_output is not None and expected_output.exists():
         lip_sync = _read_lip_sync(job_dir)
@@ -151,6 +157,12 @@ def _check_one(row: sqlite3.Row) -> None:
     slurm_job_id = row["slurm_job_id"]
     if not slurm_job_id:
         return  # sbatch hasn't returned yet -- shouldn't normally happen
+
+    if pool is not None and pool.owns_slurm_job(slurm_job_id):
+        # The worker running it is alive. If it dies, the pool queues the job again (or fails it
+        # once it has used up its attempts); the poller must not decide that from sacct.
+        _pending_since.pop(job_id, None)
+        return
 
     state = _sacct_state(slurm_job_id)
     if state is None:
@@ -187,19 +199,25 @@ def _cleanup_old_jobs() -> None:
         logger.info("Cleaned up expired job %s (%s)", row["job_id"], job_dir)
 
 
+def _poll_once(iteration: int) -> None:
+    for row in job_store.list_inflight_jobs():
+        _check_one(row)
+    if iteration == 1 or iteration % _CLEANUP_EVERY_N_POLLS == 0:
+        # Re-apply the incognito rules to any finished incognito job
+        # that still has data, and delete unreferenced uploads.
+        retention.sweep()
+    if iteration % _CLEANUP_EVERY_N_POLLS == 0:
+        _cleanup_old_jobs()
+
+
 async def poll_forever() -> None:
     iteration = 0
     while True:
         try:
-            for row in job_store.list_inflight_jobs():
-                _check_one(row)
             iteration += 1
-            if iteration == 1 or iteration % _CLEANUP_EVERY_N_POLLS == 0:
-                # Re-apply the incognito rules to any finished incognito job
-                # that still has data, and delete unreferenced uploads.
-                retention.sweep()
-            if iteration % _CLEANUP_EVERY_N_POLLS == 0:
-                _cleanup_old_jobs()
+            # In a worker thread: with hundreds of jobs in flight one pass is a lot of blocking
+            # file and Slurm calls, and must not freeze the web server's event loop.
+            await asyncio.to_thread(_poll_once, iteration)
         except Exception:
             logger.exception("poller iteration failed")
         await asyncio.sleep(config.POLL_INTERVAL_SECONDS)

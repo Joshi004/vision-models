@@ -4,6 +4,54 @@ Dates are when a change shipped on this codebase, not necessarily when you're re
 `api_version` field (`GET /v1/guide?format=json`) is this server's own current version; compare it
 against what you last integrated against.
 
+- **0.21.0** (2026-11-01): **GPU capacity limits that the operator changes while the service runs.** A global GPU
+  limit and a limit on concurrent jobs per model (for a model served by warm workers, also its most warm workers) are
+  now set on a "GPU capacity" page and no longer by environment variables (`MODEL_API_MAX_INFLIGHT` and the
+  `*_MAX_WORKERS` settings are gone). New endpoints: `GET /v1/capacity` (the limits, GPUs in use, and per model the
+  busy, idle, starting and waiting counts) and `PUT /v1/capacity`. Lowering a limit never cancels a running job:
+  busy workers finish, idle ones above the limit are stopped, and nothing new starts until usage is back under it;
+  raising a limit starts waiting requests at once. A model served by warm workers keeps requests `queued` until a
+  slot is free. LTX-2.3, LTX-2.5, RVC, TBDub and Wan-Animate run one GPU job per request and count 1 GPU each: a
+  request that finds their limit or the global limit reached gets **429** (nothing queued), where before they were
+  uncapped unless `MODEL_API_MAX_INFLIGHT` was set. `GET /v1/guide?format=json` no longer has
+  `limits.max_inflight_jobs`. Otherwise additive: no request or response field changed.
+- **0.20.0** (2026-10-31): **Parakeet and Breeze TTS now reuse loaded weights between requests**, like the image
+  and music backends. Instead of one GPU job per request, each keeps up to 4 long-lived GPU jobs (operator settings
+  `PARAKEET_MAX_WORKERS`, `BREEZE_TTS_MAX_WORKERS`) that run requests one after another and are stopped after 10 idle
+  minutes (`PARAKEET_IDLE_MINUTES`, `BREEZE_TTS_IDLE_MINUTES`). A request that finds a loaded GPU job free skips
+  loading the model; with more requests than GPU jobs the extra ones wait `queued`. Both backends also get the 0.19.0
+  behaviour: at most 1000 queued or running jobs each (429 beyond that), a request whose GPU job is lost queued again
+  under the same `job_id` (`attempts`), and an identical request answered with the earlier `job_id` and
+  `reused: true`. Requests, results and the transcript JSON are unchanged. Behaviour change: cancelling a request
+  that is already running stops its whole GPU job (the next request loads the model again).
+- **0.19.0** (2026-10-31): **Safer bursts, automatic retries and repeated requests** for Qwen-Image-2.1, MiniMax H3,
+  ACE-Step 1.5, Stable Audio Open, Stable Audio 3, YuE2 and Qwen3.8. (1) Each of these backends accepts at most
+  1000 queued or running jobs at a time (operator setting `MODEL_API_MAX_QUEUED_PER_BACKEND`); a request beyond that
+  gets 429. (2) A request whose GPU job or model server is lost (pre-empted, crashed, or the gateway restarted) goes
+  back in the queue under the same `job_id` instead of failing, up to 3 starts in total (`MODEL_API_MAX_ATTEMPTS`);
+  `GET /v1/jobs/{job_id}` has a new field `attempts`. (3) A request identical to an earlier one -- same settings,
+  same seed, same uploaded file content -- returns the earlier job's `job_id` with `status` of that job and the
+  new response field `reused: true`, instead of running again, while that job is queued, running, or succeeded with
+  its result still available; a failed job, or a request with `incognito: true`, is never reused. Qwen3.8 does this
+  only for requests that send an `Idempotency-Key` header (the same key with a different request gets 422).
+  Cancelling a reused job cancels it for everyone who was given its `job_id`. Additive: no existing field changed
+  its meaning, and `reused` is `false` for every other backend.
+- **0.18.0** (2026-10-23): **Four music and audio backends, one per model**, each with its own prefix and the same
+  submit, poll and download flow as every other backend; the result is always a **FLAC** file. Pipeline values:
+  `ace-step15:generate|cover|repaint` (`POST /v1/ace-step15/music/generate|cover|repaint`; songs with vocals, covers and
+  local repaint, 48 kHz), `yue2:generate|cover` (`POST /v1/yue2/songs/generate|cover`; whole songs from a style line and
+  lyrics, cover from an ABC melody score you supply, 48 kHz, weights are CC BY-NC 4.0), `stable-audio3:generate|transform|inpaint`
+  (`POST /v1/stable-audio3/audio/generate|transform|inpaint`; instrumentals, stems and sound effects up to
+  380 s, no vocals, 44.1 kHz) and `stable-audio-open:generate|transform` (`POST /v1/stable-audio-open/audio/generate|transform`;
+  sound effects and loops up to 47 s, 44.1 kHz). Like Qwen-Image-2.1 and H3, each keeps loaded GPU jobs (operator
+  settings `<BACKEND>_MAX_WORKERS`, `<BACKEND>_IDLE_MINUTES`; default 4 and 10 minutes), so a request that finds a loaded
+  GPU job free starts at once and the first one after an idle stop waits for the weights to load. Audio inputs are
+  uploaded first (`POST /v1/uploads`) and referenced by `source_audio_asset_id`. Each backend's section says how to
+  write its prompts; the "Music generation" tag groups the endpoints. Additive: no existing endpoint or field changed.
+  **State on release:** every endpoint has produced audio on a real GPU through this API. Once a GPU job is loaded, a
+  30 s ACE-Step song takes under 10 s, 37 s of YuE2 audio about 17 s, a Stable Audio 3 clip of any length (up to 380 s)
+  a few seconds, and 20 s of Stable Audio Open about 16 s; the first request after an idle stop waits about one to two
+  minutes for loading. Output quality has not yet been judged by ear.
 - **0.17.0** (2026-10-22): **Qwen-Image-2.1 and MiniMax H3 now reuse loaded weights between requests.** Instead of one
   GPU job per request, each backend keeps up to 8 long-lived GPU jobs (operator settings `QWEN_IMAGE21_MAX_WORKERS`,
   `H3_MAX_WORKERS`) that run requests one after another and are stopped after 10 idle minutes

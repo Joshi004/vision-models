@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 
 from common import config as common_config
+from common.slurm import slurm_time_seconds
 
 # ---------------------------------------------------------------------------
 # Project layout. This model's own code lives in models/parakeet/ in the
@@ -32,6 +33,8 @@ PARAKEET_PROJECT_ROOT = common_config.REPO_ROOT / "models" / "parakeet"
 # see ModelService_Parakeet/CUDA_FIX_SUMMARY.md). See that project's own
 # run_transcribe.sh/run_transcribe.py for the full story.
 RUN_TRANSCRIBE_SCRIPT = PARAKEET_PROJECT_ROOT / "runner" / "run_transcribe.sh"
+# The warm worker's Slurm entrypoint: a wrapper for the same CUDA-library-path reason.
+WORKER_SCRIPT = PARAKEET_PROJECT_ROOT / "runner" / "worker.sh"
 
 # The local .nemo checkpoint every transcription job loads via
 # ASRModel.restore_from() -- never from_pretrained(), so a job never needs
@@ -43,8 +46,6 @@ MODEL_PATH = Path(
         str(common_config.WEIGHTS_DIR / "parakeet" / "parakeet-tdt-0.6b-v3.nemo"),
     )
 )
-
-RUN_PIPELINE_JOB_SCRIPT = common_config.MODEL_API_DIR / "common" / "run_pipeline_job.py"
 
 # ---------------------------------------------------------------------------
 # Accepted input formats -- checked up front by dispatch.py before a job is
@@ -89,3 +90,27 @@ MEM_PER_GPU = os.environ.get("PARAKEET_MEM_PER_GPU", "32G")
 CPUS_PER_GPU = os.environ.get("PARAKEET_CPUS", "4")
 JOB_TIME_LIMIT = os.environ.get("PARAKEET_JOB_TIME", "01:00:00")
 TYPICAL_RUN_SECONDS = 90
+
+# Part of the key that recognises a repeated request (common/dedup.py). Change it by hand when the
+# weights or the transcription code change what a request produces, so earlier results are not reused.
+RESULT_VERSION = "1"
+
+# ---------------------------------------------------------------------------
+# Warm workers (see common/worker_pool.py): long-lived jobs (one GPU each) load
+# the model once and serve queued requests one at a time. How many may run at
+# once is this model's limit on the GPU capacity page (common/capacity.py), not
+# a setting here.
+# A worker with nothing to do for IDLE_MINUTES is stopped. JOB_TIME_LIMIT is
+# the longest one request may run; WORKER_TIME_LIMIT is the Slurm time limit of
+# a worker, and must be longer than that.
+# ---------------------------------------------------------------------------
+IDLE_MINUTES = float(os.environ.get("PARAKEET_IDLE_MINUTES", "10"))
+WORKER_TIME_LIMIT = os.environ.get("PARAKEET_WORKER_TIME", "12:00:00")
+
+def job_time_limit_seconds() -> int:
+    """The longest one request may run, in seconds."""
+    return slurm_time_seconds(JOB_TIME_LIMIT, "PARAKEET_JOB_TIME")
+
+
+def worker_time_limit_seconds() -> int:
+    return slurm_time_seconds(WORKER_TIME_LIMIT, "PARAKEET_WORKER_TIME")

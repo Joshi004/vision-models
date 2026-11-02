@@ -178,8 +178,8 @@ more GPUs, the less activation memory each one needs and the faster each step ru
 storage when a GPU job starts, so a short request that has to start one spends most of its wall time loading (about 5
 to 8 minutes, longer when several load at once). A request that runs on a GPU job that has already run one finds the
 weights cached on that machine and loads in seconds: a tiny request measured 441 s from cold and 77 s the second time.
-A GPU job with nothing to do for 10 minutes is stopped (operator setting `H3_IDLE_MINUTES`), and at most 8 run at
-once (`H3_MAX_WORKERS`), so with many requests at once some wait `queued` for a free one. `estimated_run_seconds`
+A GPU job with nothing to do for 10 minutes is stopped (operator setting `H3_IDLE_MINUTES`), and only as many run at
+once as the operator's limit for H3 allows (`GET /v1/capacity`), so with many requests at once some wait `queued` for a free one. `estimated_run_seconds`
 assumes a cold start, so a request that runs on an already-loaded GPU job finishes sooner than estimated.
 Cancelling a request that is already running stops its GPU job, so the next request starts cold.
 
@@ -230,3 +230,14 @@ Kingdom or South Korea** without MiniMax's separate written authorization, and c
 in yearly revenue need authorization too. This API does not enforce any of that itself.
 
 Only use faces, voices and recordings you have the right to use, and disclose generated media as such.
+
+**Sending the same request again, and retries.** A request identical to an earlier one -- the same settings,
+including the seed, and the same uploaded file *content* (uploading the file again is fine) -- does not run a second
+time. The response carries the earlier job's `job_id` with `reused: true` and that job's current `status`, as long as
+that job is still queued or running, or succeeded and its result is still available. A failed job is never reused:
+sending its request again creates a new job. A request with `incognito: true` is never matched. A reused job is shared:
+`DELETE /v1/jobs/{job_id}` cancels it for everyone who was given it. If the GPU job running your request is lost (for
+example pre-empted), the request goes back in the queue under the same `job_id` -- `attempts` on
+`GET /v1/jobs/{job_id}` shows how many times it was started, at most 3 -- while a job that fails because of its own
+request (a model error) is not run again. So a client can fire its requests, and send them again after a timeout or a
+crash, without checking first whether they are already queued.

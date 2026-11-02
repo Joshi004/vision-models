@@ -6,6 +6,7 @@ backend's dispatch module can resolve an asset_id from it.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from pathlib import Path
 
@@ -21,7 +22,9 @@ def save_upload_bytes(filename: str, data: bytes) -> tuple[str, Path]:
     # runs (e.g. by hand while clearing data); recreate it rather than fail.
     config.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
-    job_store.create_upload(asset_id, safe_name, dest, len(data))
+    # The content hash lets two uploads of the same file be recognised as the same input
+    # (common/dedup.py).
+    job_store.create_upload(asset_id, safe_name, dest, len(data), hashlib.sha256(data).hexdigest())
     return asset_id, dest
 
 

@@ -84,8 +84,9 @@ units, and what `metadata.duration` means.
 
 This replaces the previous standalone Parakeet service (`POST :8006/transcribe`, body
 `{"audio_url": "..."}`, synchronous response), which needed a GPU held for its entire lifetime
-regardless of whether a request was in flight. The new flow above holds a GPU only for the
-length of one Slurm job:
+regardless of whether a request was in flight. The new flow above holds GPUs only while there is
+work: up to 4 long-lived GPU jobs load the model once and transcribe one request after another,
+and one with no request for 10 minutes is stopped:
 
 - Upload the file instead of pointing at a URL the old service had to download itself.
 - The response is now asynchronous (`job_id` + poll), not an immediate HTTP response body.
@@ -100,3 +101,19 @@ Recordings longer than 10 minutes (decoded duration, not compressed file size) a
 automatically into overlapping 10-minute pieces and stitched back together -- no action needed on
 your part, and nothing about the request or the result's shape changes either way. Expect
 proportionally longer processing time for proportionally longer recordings.
+
+### Timing, repeated requests and retries
+
+A request that finds a loaded GPU job free starts at once without loading the model; the first request after an idle
+stop waits for a GPU job to start and load it, and with more requests than GPU jobs the extra ones stay `queued`
+until one is free.
+
+**Sending the same request again, and retries.** A request identical to an earlier one -- the same settings, and the same uploaded file *content* (uploading the file again is fine) -- does not run a second
+time. The response carries the earlier job's `job_id` with `reused: true` and that job's current `status`, as long as
+that job is still queued or running, or succeeded and its result is still available. A failed job is never reused:
+sending its request again creates a new job. A request with `incognito: true` is never matched. A reused job is shared:
+`DELETE /v1/jobs/{job_id}` cancels it for everyone who was given it. If the GPU job running your request is lost (for
+example pre-empted), the request goes back in the queue under the same `job_id` -- `attempts` on
+`GET /v1/jobs/{job_id}` shows how many times it was started, at most 3 -- while a job that fails because of its own
+request (a model error) is not run again. So a client can fire its requests, and send them again after a timeout or a
+crash, without checking first whether they are already queued.

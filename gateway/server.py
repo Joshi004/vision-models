@@ -38,6 +38,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
 from common import (
+    capacity,
     config,
     guide,
     job_store,
@@ -51,6 +52,8 @@ from common import (
 )
 from common.schemas import (
     CancelResponse,
+    CapacityResponse,
+    CapacityUpdateRequest,
     GuideResponse,
     HealthResponse,
     JobListItem,
@@ -64,6 +67,8 @@ from common.schemas import (
 )
 from common.one_time_file_response import OneTimeFileResponse
 from common.slurm import cancel_slurm_job
+from services.ace_step15 import config as ace_step15_config
+from services.ace_step15.router import router as ace_step15_router
 from services.breeze_tts import config as breeze_tts_config
 from services.breeze_tts.router import router as breeze_tts_router
 from services.h3 import config as h3_config
@@ -82,11 +87,17 @@ from services.qwen_image21 import config as qwen_image21_config
 from services.qwen_image21.router import router as qwen_image21_router
 from services.rvc import config as rvc_config
 from services.rvc.router import router as rvc_router
+from services.stable_audio3 import config as stable_audio3_config
+from services.stable_audio3.router import router as stable_audio3_router
+from services.stable_audio_open import config as stable_audio_open_config
+from services.stable_audio_open.router import router as stable_audio_open_router
 from services.tbdub import config as tbdub_config
 from services.tbdub.router import router as tbdub_router
 from services.wan_animate import config as wan_animate_config
 from services.wan_animate import progress as wan_animate_progress
 from services.wan_animate.router import router as wan_animate_router
+from services.yue2 import config as yue2_config
+from services.yue2.router import router as yue2_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("model-api")
@@ -100,9 +111,10 @@ _pool_tasks: list[asyncio.Task] = []
 async def lifespan(_app: FastAPI):
     config.ensure_directories()
     job_store.init_db()
-    # Qwen3.8 requests are tasks inside this process; whatever a restart interrupted can never finish.
-    qwen38_dispatch.fail_orphaned_jobs()
-    # Warm worker pools (Qwen-Image-2.1, H3): find the workers still running and the requests still
+    # Qwen3.8 requests are tasks inside this process; whatever a restart interrupted is started again
+    # from its stored request (or failed, once it has used up its attempts).
+    await qwen38_dispatch.resume_orphaned_jobs()
+    # Warm worker pools (image, H3, music, Parakeet, Breeze TTS): find the workers still running and the requests still
     # queued from before this start, then keep them scheduled. The workers keep running if this stops.
     for pool in worker_pool.pools():
         await asyncio.to_thread(pool.recover)
@@ -123,7 +135,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="GPU Cluster Model-Serving API",
-    version="0.17.0",
+    version="0.21.0",
     description=openapi_docs.APP_DESCRIPTION,
     openapi_tags=openapi_docs.TAGS_METADATA,
     lifespan=lifespan,
@@ -142,6 +154,10 @@ app.include_router(qwen_image21_router, prefix="/v1/qwen-image21")
 app.include_router(tbdub_router, prefix="/v1/tbdub")
 app.include_router(h3_router, prefix="/v1/h3")
 app.include_router(qwen38_router, prefix="/v1/qwen38")
+app.include_router(ace_step15_router, prefix="/v1/ace-step15")
+app.include_router(stable_audio_open_router, prefix="/v1/stable-audio-open")
+app.include_router(stable_audio3_router, prefix="/v1/stable-audio3")
+app.include_router(yue2_router, prefix="/v1/yue2")
 
 # Registered backends, for GET /v1/guide (common/guide.py) -- each entry is
 # a small, enumerable set of facts: display name, path prefix, and where
@@ -161,6 +177,10 @@ _BACKENDS: list[guide.BackendInfo] = [
     guide.BackendInfo(id="tbdub", name="TBDub lip sync", prefix="/v1/tbdub", guide_file="tbdub/GUIDE.md"),
     guide.BackendInfo(id="h3", name="MiniMax H3", prefix="/v1/h3", guide_file="h3/GUIDE.md"),
     guide.BackendInfo(id="qwen38", name="Qwen3.8 text model", prefix="/v1/qwen38", guide_file="qwen38/GUIDE.md"),
+    guide.BackendInfo(id="ace-step15", name="ACE-Step 1.5 music generation", prefix="/v1/ace-step15", guide_file="ace_step15/GUIDE.md"),
+    guide.BackendInfo(id="stable-audio-open", name="Stable Audio Open 1.0 audio generation", prefix="/v1/stable-audio-open", guide_file="stable_audio_open/GUIDE.md"),
+    guide.BackendInfo(id="stable-audio3", name="Stable Audio 3 audio generation", prefix="/v1/stable-audio3", guide_file="stable_audio3/GUIDE.md"),
+    guide.BackendInfo(id="yue2", name="YuE2 song generation", prefix="/v1/yue2", guide_file="yue2/GUIDE.md"),
 ]
 
 
@@ -238,6 +258,36 @@ def get_partitions() -> PartitionStatusResponse:
     )
 
 
+@app.get(
+    "/v1/capacity",
+    tags=["System"],
+    summary="GPU capacity limits and current usage",
+    description=openapi_docs.CAPACITY,
+    response_model=CapacityResponse,
+)
+def get_capacity() -> CapacityResponse:
+    return CapacityResponse(**capacity.status())
+
+
+@app.put(
+    "/v1/capacity",
+    tags=["System"],
+    summary="Change the GPU capacity limits",
+    description=openapi_docs.CAPACITY_UPDATE,
+    response_model=CapacityResponse,
+    responses=openapi_docs.CAPACITY_RESPONSES,
+)
+def put_capacity(body: CapacityUpdateRequest) -> CapacityResponse:
+    try:
+        capacity.update(body.global_gpus, body.max_jobs)
+    except capacity.InvalidSettings as e:
+        raise HTTPException(422, str(e)) from e
+    # Run a scheduling pass on every pool now, so a raised limit starts queued requests and a
+    # lowered one stops the idle workers over it right away.
+    worker_pool.pools_apply_now()
+    return CapacityResponse(**capacity.status())
+
+
 @app.post(
     "/v1/uploads",
     tags=["Uploads"],
@@ -276,6 +326,10 @@ _TYPICAL_FALLBACK_SECONDS: dict[str, float] = {
     "tbdub": tbdub_config.TYPICAL_RUN_SECONDS,
     "h3": h3_config.TYPICAL_RUN_SECONDS,
     "qwen38": qwen38_config.TYPICAL_RUN_SECONDS,
+    "ace-step15": ace_step15_config.TYPICAL_RUN_SECONDS,
+    "stable-audio-open": stable_audio_open_config.TYPICAL_RUN_SECONDS,
+    "stable-audio3": stable_audio3_config.TYPICAL_RUN_SECONDS,
+    "yue2": yue2_config.TYPICAL_RUN_SECONDS,
 }
 
 # Same idea, but for live progress readers -- most backends have none
@@ -344,6 +398,7 @@ def _row_to_status(row: sqlite3.Row, typical_cache: dict[str, tuple[float | None
         typical_basis=typical_basis,
         gpus=row["gpus"],
         estimated_run_seconds=row["estimated_run_seconds"],
+        attempts=row["attempts"],
         progress=progress,
         lip_sync=_lip_sync_result(row),
     )

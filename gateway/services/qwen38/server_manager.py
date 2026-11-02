@@ -58,6 +58,11 @@ class ServerError(RuntimeError):
     """The server could not be started, stopped being reachable, or went away."""
 
 
+class ServerLost(ServerError):
+    """The server was running when the request was sent but went away before answering (stopped,
+    or pre-empted). Not the request's fault, so dispatch.py runs it again."""
+
+
 class RequestRejected(RuntimeError):
     """The server answered, but refused the request (for example an invalid schema or a prompt
     that does not fit). The message is the server's own."""
@@ -85,6 +90,13 @@ def _read_job_id() -> str | None:
         return _JOB_ID_FILE.read_text().strip() or None
     except OSError:
         return None
+
+
+def gpus_held() -> int:
+    """The GPUs the model server holds: 1 while a server job exists (queued, loading or ready), else 0.
+    Read by common/capacity.py on every scheduling pass, so this only looks at the job-id file
+    (which _snapshot clears once the job is gone) and never calls Slurm."""
+    return 1 if _read_job_id() is not None else 0
 
 
 def _squeue_state(slurm_job_id: str) -> str | None:
@@ -313,7 +325,7 @@ class ChatCall:
     def run(self, payload: dict) -> dict:
         info = _read_json(_STATE_FILE)
         if info is None:
-            raise ServerError("The model server is not running (it stopped, or was stopped while idle). Try again.")
+            raise ServerLost("The model server is not running (it stopped, or was stopped while idle). Try again.")
         try:
             api_key = _KEY_FILE.read_text().strip()
         except OSError as e:
@@ -332,7 +344,7 @@ class ChatCall:
         except (OSError, http.client.HTTPException) as e:
             if self._aborted.is_set():
                 raise ServerError("Cancelled.") from e
-            raise ServerError(
+            raise ServerLost(
                 f"Lost the connection to the model server ({type(e).__name__}: {e}). "
                 "It may have been stopped or pre-empted; submit the request again."
             ) from e

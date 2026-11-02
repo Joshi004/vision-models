@@ -1,7 +1,7 @@
 """Builds Qwen-Image-2.1's invocation and queues it for a warm worker.
 
-Unlike most backends a request has no Slurm job of its own: up to
-config.MAX_WORKERS long-lived worker jobs (models/qwen_image21/runner/worker.py,
+Unlike most backends a request has no Slurm job of its own: a few
+long-lived (as many as the GPU capacity page allows) worker jobs (models/qwen_image21/runner/worker.py,
 with that model's own environment) each load a checkpoint once and serve queued
 requests one at a time. common/worker_pool.py starts, feeds and stops them;
 this module only writes the job's files (args.json, output_path.txt: the same
@@ -21,7 +21,7 @@ import shlex
 from pathlib import Path
 
 from common import config as common_config
-from common import job_store, storage
+from common import dedup, job_store, storage
 from common.slurm import resolve_partition
 from common.worker_pool import PoolError, PoolRequest, WorkerPool
 from services.qwen_image21 import config
@@ -33,7 +33,7 @@ class DispatchError(RuntimeError):
 
 
 class CapacityError(RuntimeError):
-    """Too many jobs already in flight (see common.config.MAX_INFLIGHT_JOBS)."""
+    """Too many jobs already queued or running for this model (see common.config.MAX_QUEUED_PER_BACKEND)."""
 
 
 class InputError(RuntimeError):
@@ -41,12 +41,10 @@ class InputError(RuntimeError):
 
 
 def _check_capacity() -> None:
-    if (
-        common_config.MAX_INFLIGHT_JOBS is not None
-        and job_store.count_inflight_jobs() >= common_config.MAX_INFLIGHT_JOBS
-    ):
+    if job_store.count_inflight_for(pool.pipelines) >= common_config.MAX_QUEUED_PER_BACKEND:
         raise CapacityError(
-            f"At capacity: {common_config.MAX_INFLIGHT_JOBS} job(s) already in flight. Try again shortly."
+            f"This model already has {common_config.MAX_QUEUED_PER_BACKEND} job(s) queued or running. "
+            "Try again shortly."
         )
 
 
@@ -120,19 +118,19 @@ def _worker_sbatch_command(worker_id: str, worker_dir: Path, key: str, partition
 
 pool = WorkerPool(
     "qwen_image21",
+    label="Qwen-Image-2.1",
     pipelines=("qwen-image21:generate", "qwen-image21:edit"),
-    max_workers=config.MAX_WORKERS,
+    default_max_jobs=8,
     idle_seconds=config.IDLE_MINUTES * 60,
     worker_time_seconds=config.worker_time_limit_seconds(),
     build_sbatch_command=_worker_sbatch_command,
 )
 
 
-def _dispatch(req: QwenImageGenerateRequest | QwenImageEditRequest, pipeline: str) -> str:
-    """Validate capacity + reference assets, then create the job directory/DB
+def _dispatch(req: QwenImageGenerateRequest | QwenImageEditRequest, pipeline: str) -> dedup.Submission:
+    """Validate the reference assets, reuse an identical earlier request if there is one, else create the job directory/DB
     row and queue the request, in that order, so an invalid request never
     leaves debris behind."""
-    _check_capacity()
     partition = resolve_partition(req.partition)
     job_id = job_store.new_id()
     job_dir = common_config.JOBS_DIR / job_id
@@ -143,8 +141,14 @@ def _dispatch(req: QwenImageGenerateRequest | QwenImageEditRequest, pipeline: st
     # the DB.
     module_args = build_args(req, output_path)
 
-    job_dir.mkdir(parents=True)
-    job_store.create_job(job_id, pipeline, job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito)
+    dedup_key = None if req.incognito else dedup.content_key(pipeline, req.model_dump(mode="json"), config.RESULT_VERSION)
+    with dedup.lock:
+        earlier = dedup.find_reusable(dedup_key)
+        if earlier is not None:
+            return dedup.reuse(earlier)
+        _check_capacity()
+        job_dir.mkdir(parents=True)
+        job_store.create_job(job_id, pipeline, job_dir, req.model_dump(mode="json"), partition, incognito=req.incognito, dedup_key=dedup_key)
     try:
         _write_job_files(job_dir, module_args, output_path)
         pool.enqueue(
@@ -160,12 +164,12 @@ def _dispatch(req: QwenImageGenerateRequest | QwenImageEditRequest, pipeline: st
     except (OSError, PoolError) as e:
         job_store.mark_failed(job_id, "Could not queue the request.")
         raise DispatchError(str(e)) from e
-    return job_id
+    return dedup.Submission(job_id, "queued")
 
 
-def dispatch_generate(req: QwenImageGenerateRequest) -> str:
+def dispatch_generate(req: QwenImageGenerateRequest) -> dedup.Submission:
     return _dispatch(req, "qwen-image21:generate")
 
 
-def dispatch_edit(req: QwenImageEditRequest) -> str:
+def dispatch_edit(req: QwenImageEditRequest) -> dedup.Submission:
     return _dispatch(req, "qwen-image21:edit")

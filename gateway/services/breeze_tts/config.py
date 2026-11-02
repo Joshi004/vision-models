@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 
 from common import config as common_config
+from common.slurm import slurm_time_seconds
 
 # ---------------------------------------------------------------------------
 # Project layout. This model's own code (the Slurm entrypoint) lives in
@@ -33,6 +34,9 @@ BREEZE_TTS_PYTHON = common_config.ENVS_DIR / "breeze_tts" / "bin" / "python"
 # imageio-ffmpeg from that venv). Wraps upstream's infer.py and decodes any
 # reference recording to WAV first -- see that script's own header comment.
 RUN_SYNTHESIZE_SCRIPT = BREEZE_TTS_PROJECT_ROOT / "runner" / "run_synthesize.py"
+# The warm worker, run with BREEZE_TTS_PYTHON: loads the model once and runs the same
+# generation in-process for each request.
+WORKER_SCRIPT = BREEZE_TTS_PROJECT_ROOT / "runner" / "worker.py"
 
 # Local checkpoint directory (tokenizer, model, bundled audio_tokenizer).
 # Loaded from disk, so a job never needs network access (every Slurm job this
@@ -40,8 +44,6 @@ RUN_SYNTHESIZE_SCRIPT = BREEZE_TTS_PROJECT_ROOT / "runner" / "run_synthesize.py"
 MODEL_DIR = Path(
     os.environ.get("BREEZE_TTS_MODEL_DIR", str(common_config.WEIGHTS_DIR / "breeze_tts" / "breeze-tts-2"))
 )
-
-RUN_PIPELINE_JOB_SCRIPT = common_config.MODEL_API_DIR / "common" / "run_pipeline_job.py"
 
 # ---------------------------------------------------------------------------
 # Accepted reference-recording extensions (voice clone / direction). Checked
@@ -80,3 +82,27 @@ MEM_PER_GPU = os.environ.get("BREEZE_TTS_MEM_PER_GPU", "32G")
 CPUS_PER_GPU = os.environ.get("BREEZE_TTS_CPUS", "4")
 JOB_TIME_LIMIT = os.environ.get("BREEZE_TTS_JOB_TIME", "00:15:00")
 TYPICAL_RUN_SECONDS = 90
+
+# Part of the key that recognises a repeated request (common/dedup.py). Change it by hand when the
+# weights or the synthesis code change what a request produces, so earlier results are not reused.
+RESULT_VERSION = "1"
+
+# ---------------------------------------------------------------------------
+# Warm workers (see common/worker_pool.py): long-lived jobs (one GPU each) load
+# the model once and serve queued requests one at a time. How many may run at
+# once is this model's limit on the GPU capacity page (common/capacity.py), not
+# a setting here.
+# A worker with nothing to do for IDLE_MINUTES is stopped. JOB_TIME_LIMIT is
+# the longest one request may run; WORKER_TIME_LIMIT is the Slurm time limit of
+# a worker, and must be longer than that.
+# ---------------------------------------------------------------------------
+IDLE_MINUTES = float(os.environ.get("BREEZE_TTS_IDLE_MINUTES", "10"))
+WORKER_TIME_LIMIT = os.environ.get("BREEZE_TTS_WORKER_TIME", "12:00:00")
+
+def job_time_limit_seconds() -> int:
+    """The longest one request may run, in seconds."""
+    return slurm_time_seconds(JOB_TIME_LIMIT, "BREEZE_TTS_JOB_TIME")
+
+
+def worker_time_limit_seconds() -> int:
+    return slurm_time_seconds(WORKER_TIME_LIMIT, "BREEZE_TTS_WORKER_TIME")

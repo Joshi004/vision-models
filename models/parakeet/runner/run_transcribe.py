@@ -74,7 +74,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import imageio_ffmpeg
 import soundfile as sf
@@ -328,17 +328,19 @@ def load_model(model_path: Path) -> Any:
     return model
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--input-path", required=True, help="The original audio/video file to transcribe.")
     parser.add_argument("--work-dir", required=True, help="Directory to write the decoded WAV (and any chunks) into.")
     parser.add_argument("--model-path", required=True, help="Path to the local parakeet-tdt-0.6b-v3.nemo checkpoint.")
     parser.add_argument("--output-path", required=True, help="Where to write the transcript JSON.")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = _parse_args()
+def run(args: argparse.Namespace, get_model: Callable[[Path], Any]) -> int:
+    """One transcription; returns the exit code. `get_model(model_path)` gives the loaded model: a
+    one-shot job loads it (load_model), a warm worker (worker.py) hands back the one it holds. It is
+    called only once the input has been decoded, so an unreadable file fails before any loading."""
     start_time = time.monotonic()
 
     input_path = Path(args.input_path)
@@ -358,7 +360,7 @@ def main() -> int:
         decode_to_wav(input_path, decoded_path)
 
         chunks = split_into_chunks(decoded_path, work_dir / "chunks")
-        model = load_model(model_path)
+        model = get_model(model_path)
 
         chunk_results = []
         for i, chunk in enumerate(chunks):
@@ -394,6 +396,10 @@ def main() -> int:
         flush=True,
     )
     return 0
+
+
+def main() -> int:
+    return run(_parse_args(), load_model)
 
 
 if __name__ == "__main__":

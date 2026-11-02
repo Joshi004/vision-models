@@ -61,15 +61,24 @@ always-on API, so existing downstream parsing code keeps working):
 - `word_timestamps`/`segment_timestamps` can be empty lists for a recording with no detected speech
   (silence, music-only, or an unsupported language); `metadata.duration` is then `0.0`.
 
-**Timing:** measured at 63-117 seconds end to end (queueing + node allocation
-+ the run itself) across a handful of real jobs on this cluster, from a
-10-second clip up to a 35-minute chunked recording -- see
-`typical_run_seconds` on `GET /v1/jobs/{{job_id}}` for a live,
-continuously-updated estimate as more jobs run. In that small sample, which
-node a job happened to land on affected timing more than recording length
-did (model loading dominates for anything under a few chunks); expect very
-long recordings to eventually take proportionally longer once chunk count
-grows large enough for that to dominate instead.
+**Timing:** requests are run by a small number of long-lived GPU jobs that
+load the model once and transcribe one recording after another; one with
+no request for 10 minutes is stopped. A request that finds one free starts
+at once and skips loading the model; the first request after an idle stop
+waits for a GPU job to start and load. When every GPU job was started
+fresh for its request, measured times were 63-117 seconds end to end
+(queueing + node allocation + loading + the run itself), from a 10-second
+clip up to a 35-minute chunked recording, with loading dominating for
+anything under a few chunks; a request on an already loaded GPU job takes
+correspondingly less (not yet measured). See `typical_run_seconds` on
+`GET /v1/jobs/{{job_id}}` for a live, continuously-updated estimate. Very
+long recordings take proportionally longer once chunk count dominates.
+
+**Repeated requests:** an identical request (same uploaded file content,
+same settings) while the earlier job is queued, running or succeeded with
+its result still available returns that job's `job_id` with `reused: true`
+instead of running again; a request whose GPU job is lost is queued again
+under the same `job_id`. See the Parakeet section of `GET /v1/guide`.
 """
 
 TRANSCRIBE_EXAMPLES = {

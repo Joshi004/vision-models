@@ -42,7 +42,7 @@ _HTTP_METHODS = frozenset({"get", "post", "put", "patch", "delete", "options", "
 # Path prefixes shared by every backend -- not registered in server.py's
 # backend list because they're not backend-specific. Used only to group the
 # generated endpoint reference; see _bucket_operations.
-_SHARED_PATH_PREFIXES = ("/v1/health", "/v1/partitions", "/v1/uploads", "/v1/jobs")
+_SHARED_PATH_PREFIXES = ("/v1/health", "/v1/partitions", "/v1/capacity", "/v1/uploads", "/v1/jobs")
 
 # {{name}} placeholders left for the final per-request fill (see render())
 # -- never an error if a narrative file uses one of these, unlike every
@@ -83,13 +83,6 @@ def _static_facts() -> dict[str, str]:
     never a hardcoded number, so it can't silently drift from this server's
     actual running configuration."""
     upload_mb = config.MAX_UPLOAD_BYTES // (1024 * 1024)
-    if config.MAX_INFLIGHT_JOBS is None:
-        max_inflight_line = "No fixed concurrency cap is configured on this deployment right now."
-    else:
-        max_inflight_line = (
-            f"At most {config.MAX_INFLIGHT_JOBS} job(s) may be in flight across every backend at "
-            "once on this deployment right now; a request past that cap gets a 429."
-        )
     days = _fmt_days(config.JOB_RETENTION_DAYS)
     retention_text = (
         f"**Retention:** by default everything about a job -- its prompt/settings, uploaded inputs, logs and "
@@ -116,7 +109,6 @@ def _static_facts() -> dict[str, str]:
         "upload_retention_text": upload_retention_text,
         "job_retention_days": days,
         "default_partition": config.FALLBACK_PARTITION,
-        "max_inflight_line": max_inflight_line,
     }
 
 
@@ -364,7 +356,6 @@ def render(app: Any, backends: list[BackendInfo], base_url: str) -> tuple[str, d
         "limits": {
             "max_upload_mb": config.MAX_UPLOAD_BYTES // (1024 * 1024),
             "job_retention_days": config.JOB_RETENTION_DAYS,
-            "max_inflight_jobs": config.MAX_INFLIGHT_JOBS,
         },
         "polling": {
             "recommended_interval_seconds": [10, 15],

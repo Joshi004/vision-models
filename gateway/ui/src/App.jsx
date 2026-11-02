@@ -3,6 +3,7 @@ import Header from './components/Header.jsx';
 import Sidebar from './components/Sidebar.jsx';
 import JobsPanel from './components/JobsPanel.jsx';
 import JobHistory from './components/JobHistory.jsx';
+import CapacityPage from './components/CapacityPage.jsx';
 import { ToastProvider } from './components/ui/Toast.jsx';
 import { FilmIcon, LayersIcon, WaveIcon, RedoIcon, MusicIcon, SwapUserIcon, MicIcon, StackIcon, TranscriptIcon, ImageIcon } from './components/icons.jsx';
 import TextToVideoForm from './forms/TextToVideoForm.jsx';
@@ -22,6 +23,10 @@ import BreezeTtsForm from './forms/BreezeTtsForm.jsx';
 import LipSyncForm from './forms/LipSyncForm.jsx';
 import { QwenImageGenerateForm, QwenImageEditForm } from './forms/QwenImageForm.jsx';
 import Qwen38GenerateForm from './forms/Qwen38GenerateForm.jsx';
+import { AceStepGenerateForm, AceStepCoverForm, AceStepRepaintForm } from './forms/AceStepForm.jsx';
+import { Yue2GenerateForm, Yue2CoverForm } from './forms/Yue2Form.jsx';
+import { StableAudio3GenerateForm, StableAudio3TransformForm, StableAudio3InpaintForm } from './forms/StableAudio3Form.jsx';
+import { StableAudioOpenGenerateForm, StableAudioOpenTransformForm } from './forms/StableAudioOpenForm.jsx';
 import { getHealth, getOpenApi } from './api.js';
 import { extractSchemas, SchemaContext } from './schema.js';
 import { usePersistedState } from './storage.js';
@@ -41,6 +46,10 @@ const GROUPS = [
   { id: 'breeze', label: 'Text to Speech' },
   { id: 'qwen-image', label: 'Image Generation' },
   { id: 'qwen38', label: 'Text model' },
+  { id: 'ace-step', label: 'Music: ACE-Step 1.5' },
+  { id: 'yue2', label: 'Music: YuE2' },
+  { id: 'stable-audio3', label: 'Audio: Stable Audio 3' },
+  { id: 'stable-audio-open', label: 'Audio: Stable Audio Open' },
 ];
 
 // One entry per generation recipe this API actually has today. `pipeline`
@@ -243,6 +252,96 @@ const RECIPES = [
     Component: Qwen38GenerateForm,
     pipeline: 'qwen38:generate',
   },
+  {
+    id: 'ace-step-generate',
+    label: 'Text to music',
+    description: 'Generate a song with vocals, or an instrumental, from a caption and lyrics with ACE-Step 1.5.',
+    group: 'ace-step',
+    icon: MusicIcon,
+    Component: AceStepGenerateForm,
+    pipeline: 'ace-step15:generate',
+  },
+  {
+    id: 'ace-step-cover',
+    label: 'Cover',
+    description: 'Restyle an existing recording and keep its structure with ACE-Step 1.5.',
+    group: 'ace-step',
+    icon: MusicIcon,
+    Component: AceStepCoverForm,
+    pipeline: 'ace-step15:cover',
+  },
+  {
+    id: 'ace-step-repaint',
+    label: 'Repaint',
+    description: 'Regenerate one time window of a recording and keep the rest with ACE-Step 1.5.',
+    group: 'ace-step',
+    icon: MusicIcon,
+    Component: AceStepRepaintForm,
+    pipeline: 'ace-step15:repaint',
+  },
+  {
+    id: 'yue2-generate',
+    label: 'Song from lyrics',
+    description: 'Generate a full song with sung vocals from a style line and lyrics with YuE2.',
+    group: 'yue2',
+    icon: MusicIcon,
+    Component: Yue2GenerateForm,
+    pipeline: 'yue2:generate',
+  },
+  {
+    id: 'yue2-cover',
+    label: 'Cover from a score',
+    description: 'Generate a song that follows an ABC melody score you supply, in a new style, with YuE2.',
+    group: 'yue2',
+    icon: MusicIcon,
+    Component: Yue2CoverForm,
+    pipeline: 'yue2:cover',
+  },
+  {
+    id: 'stable-audio3-generate',
+    label: 'Text to audio',
+    description: 'Generate music, sound effects or ambience up to about 6 minutes with Stable Audio 3.',
+    group: 'stable-audio3',
+    icon: WaveIcon,
+    Component: StableAudio3GenerateForm,
+    pipeline: 'stable-audio3:generate',
+  },
+  {
+    id: 'stable-audio3-transform',
+    label: 'Transform',
+    description: 'Re-imagine an existing recording from a prompt with Stable Audio 3.',
+    group: 'stable-audio3',
+    icon: WaveIcon,
+    Component: StableAudio3TransformForm,
+    pipeline: 'stable-audio3:transform',
+  },
+  {
+    id: 'stable-audio3-inpaint',
+    label: 'Inpaint / extend',
+    description: 'Regenerate one time window of a recording, or extend it, with Stable Audio 3.',
+    group: 'stable-audio3',
+    icon: WaveIcon,
+    Component: StableAudio3InpaintForm,
+    pipeline: 'stable-audio3:inpaint',
+  },
+  {
+    id: 'stable-audio-open-generate',
+    label: 'Text to audio',
+    description: 'Generate sound effects, loops and short clips up to 47 seconds with Stable Audio Open 1.0.',
+    group: 'stable-audio-open',
+    icon: WaveIcon,
+    Component: StableAudioOpenGenerateForm,
+    pipeline: 'stable-audio-open:generate',
+  },
+  {
+    id: 'stable-audio-open-transform',
+    label: 'Transform',
+    description: 'Re-imagine an existing recording from a prompt with Stable Audio Open 1.0.',
+    group: 'stable-audio-open',
+    icon: WaveIcon,
+    Component: StableAudioOpenTransformForm,
+    pipeline: 'stable-audio-open:transform',
+  },
 ];
 
 // True if some recipe form above can actually resubmit this job's exact
@@ -276,9 +375,11 @@ function withoutAssetIds(value) {
 // generation recipe and doesn't take the same defaultPartition/onSubmitted
 // props every recipe form does.
 const HISTORY_ID = 'job-history';
+// Likewise for the GPU capacity page (components/CapacityPage.jsx).
+const CAPACITY_ID = 'gpu-capacity';
 
 function isValidActiveId(id) {
-  return id === HISTORY_ID || RECIPES.some((recipe) => recipe.id === id);
+  return id === HISTORY_ID || id === CAPACITY_ID || RECIPES.some((recipe) => recipe.id === id);
 }
 
 export default function App() {
@@ -382,6 +483,7 @@ export default function App() {
   }, []);
 
   const showingHistory = activeId === HISTORY_ID;
+  const showingCapacity = activeId === CAPACITY_ID;
   const activeRecipe = RECIPES.find((recipe) => recipe.id === activeId) ?? RECIPES[0];
   const ActiveForm = activeRecipe.Component;
 
@@ -445,11 +547,17 @@ export default function App() {
               recipes={RECIPES}
               activeId={activeId}
               showingHistory={showingHistory}
+              showingCapacity={showingCapacity}
               onSelectRecipe={selectRecipe}
               onSelectHistory={() => setActiveId(HISTORY_ID)}
+              onSelectCapacity={() => setActiveId(CAPACITY_ID)}
             />
             <main ref={mainRef} className="flex-1 overflow-y-auto">
-              {showingHistory ? (
+              {showingCapacity ? (
+                <div className="px-5 py-6 lg:px-10">
+                  <CapacityPage />
+                </div>
+              ) : showingHistory ? (
                 <div className="px-5 py-6 lg:px-10">
                   <JobHistory
                     jobRetentionDays={health?.job_retention_days}

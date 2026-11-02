@@ -21,7 +21,7 @@ router = APIRouter()
 
 def _submit(dispatch_fn, req) -> JobSubmitResponse:
     try:
-        job_id, sized = dispatch_fn(req)
+        submission, gpus, estimated_run_seconds = dispatch_fn(req)
     except dispatch.CapacityError as e:
         raise HTTPException(429, str(e)) from e
     except (KeyError, FileNotFoundError) as e:
@@ -32,7 +32,11 @@ def _submit(dispatch_fn, req) -> JobSubmitResponse:
     except dispatch.DispatchError as e:
         raise HTTPException(502, f"Could not submit Slurm job: {e}") from e
     return JobSubmitResponse(
-        job_id=job_id, status="queued", gpus=sized.gpus, estimated_run_seconds=sized.estimated_run_seconds
+        job_id=submission.job_id,
+        status=submission.status,
+        reused=submission.reused,
+        gpus=gpus,
+        estimated_run_seconds=estimated_run_seconds,
     )
 
 

@@ -1,8 +1,8 @@
 """Builds the MiniMax H3 invocation and queues it for a warm worker.
 
 Like services/ltx25/dispatch.py this builds the argv for one `models/h3/runner/run_h3.py`
-run, but a request has no Slurm job of its own: up to config.MAX_WORKERS long-lived worker
-jobs (models/h3/runner/worker.py) each hold 4 or 8 GPUs and run queued requests one after
+run, but a request has no Slurm job of its own: a few long-lived worker (as many as the GPU
+capacity page allows) jobs (models/h3/runner/worker.py) each hold 4 or 8 GPUs and run queued requests one after
 another, so only a worker's first request reads the checkpoints from shared storage.
 common/worker_pool.py starts, feeds and stops them; this module writes the job's files
 (args.json, output_path.txt: the partial-path-rename convention of common/run_pipeline_job.py,
@@ -29,7 +29,7 @@ import shlex
 from pathlib import Path
 
 from common import config as common_config
-from common import job_store, storage
+from common import dedup, job_store, storage
 from common.slurm import resolve_partition
 from common.worker_pool import PoolError, PoolRequest, WorkerPool
 from services.h3 import config, sizing, video_shape
@@ -41,16 +41,14 @@ class DispatchError(RuntimeError):
 
 
 class CapacityError(RuntimeError):
-    """Too many jobs already in flight (see common.config.MAX_INFLIGHT_JOBS)."""
+    """Too many jobs already queued or running for this model (see common.config.MAX_QUEUED_PER_BACKEND)."""
 
 
 def _check_capacity() -> None:
-    if (
-        common_config.MAX_INFLIGHT_JOBS is not None
-        and job_store.count_inflight_jobs() >= common_config.MAX_INFLIGHT_JOBS
-    ):
+    if job_store.count_inflight_for(pool.pipelines) >= common_config.MAX_QUEUED_PER_BACKEND:
         raise CapacityError(
-            f"At capacity: {common_config.MAX_INFLIGHT_JOBS} job(s) already in flight. Try again shortly."
+            f"This model already has {common_config.MAX_QUEUED_PER_BACKEND} job(s) queued or running. "
+            "Try again shortly."
         )
 
 
@@ -199,19 +197,22 @@ def _worker_sbatch_command(worker_id: str, worker_dir: Path, key: str, partition
 
 pool = WorkerPool(
     "h3",
+    label="MiniMax H3",
     pipelines=("h3:generate", "h3:audio-to-video"),
-    max_workers=config.MAX_WORKERS,
+    planning_gpus=4,  # a job uses 4 or 8 GPUs; limits are validated as if it used 4
+    default_max_jobs=8,
     idle_seconds=config.IDLE_MINUTES * 60,
     worker_time_seconds=config.worker_time_limit_seconds(),
     build_sbatch_command=_worker_sbatch_command,
 )
 
 
-def _dispatch(pipeline: str, req, build_args) -> tuple[str, sizing.Sizing]:
-    """Shared submit path: validate capacity + assets + size, then create the job
-    directory/DB row and queue the request, in that order, so an invalid request never
-    leaves debris behind. Returns the job id and the sizing decision."""
-    _check_capacity()
+def _dispatch(pipeline: str, req, build_args) -> tuple[dedup.Submission, int | None, float | None]:
+    """Shared submit path: validate assets + size, reuse an identical earlier request if there
+    is one, else check capacity, create the job directory/DB row and queue the request, in that
+    order, so an invalid request never leaves debris behind. Returns the submission and the
+    sizing decision (the GPU count and the run-time estimate; those of the earlier job when it
+    was reused)."""
     partition = resolve_partition(getattr(req, "partition", None))
     job_id = job_store.new_id()
     job_dir = common_config.JOBS_DIR / job_id
@@ -222,18 +223,25 @@ def _dispatch(pipeline: str, req, build_args) -> tuple[str, sizing.Sizing]:
     # anything is created on disk or in the DB.
     module_args, sized = build_args(req, output_path, job_dir)
 
-    job_dir.mkdir(parents=True)
-    sized.save(job_dir)
-    job_store.create_job(
-        job_id,
-        pipeline,
-        job_dir,
-        req.model_dump(mode="json"),
-        partition,
-        incognito=req.incognito,
-        gpus=sized.gpus,
-        estimated_run_seconds=sized.estimated_run_seconds,
-    )
+    dedup_key = None if req.incognito else dedup.content_key(pipeline, req.model_dump(mode="json"), config.RESULT_VERSION)
+    with dedup.lock:
+        earlier = dedup.find_reusable(dedup_key)
+        if earlier is not None:
+            return dedup.reuse(earlier), earlier["gpus"], earlier["estimated_run_seconds"]
+        _check_capacity()
+        job_dir.mkdir(parents=True)
+        sized.save(job_dir)
+        job_store.create_job(
+            job_id,
+            pipeline,
+            job_dir,
+            req.model_dump(mode="json"),
+            partition,
+            incognito=req.incognito,
+            gpus=sized.gpus,
+            estimated_run_seconds=sized.estimated_run_seconds,
+            dedup_key=dedup_key,
+        )
     try:
         _write_job_files(job_dir, module_args, output_path)
         pool.enqueue(
@@ -249,12 +257,12 @@ def _dispatch(pipeline: str, req, build_args) -> tuple[str, sizing.Sizing]:
     except (OSError, PoolError) as e:
         job_store.mark_failed(job_id, "Could not queue the request.")
         raise DispatchError(str(e)) from e
-    return job_id, sized
+    return dedup.Submission(job_id, "queued"), sized.gpus, sized.estimated_run_seconds
 
 
-def dispatch_generate(req: H3GenerateRequest) -> tuple[str, sizing.Sizing]:
+def dispatch_generate(req: H3GenerateRequest) -> tuple[dedup.Submission, int | None, float | None]:
     return _dispatch("h3:generate", req, build_generate_args)
 
 
-def dispatch_audio_to_video(req: H3AudioToVideoRequest) -> tuple[str, sizing.Sizing]:
+def dispatch_audio_to_video(req: H3AudioToVideoRequest) -> tuple[dedup.Submission, int | None, float | None]:
     return _dispatch("h3:audio-to-video", req, build_audio_to_video_args)

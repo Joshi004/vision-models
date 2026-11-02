@@ -53,6 +53,11 @@ CREATE TABLE IF NOT EXISTS uploads (
     size_bytes INTEGER NOT NULL,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -66,7 +71,9 @@ def new_id() -> str:
 
 @contextlib.contextmanager
 def _connect() -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(config.DB_PATH)
+    # A burst of submissions writes from several threads at once: wait for the lock
+    # (up to 30 s) instead of failing at once with "database is locked".
+    conn = sqlite3.connect(config.DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -99,6 +106,19 @@ def init_db() -> None:
             conn.execute("ALTER TABLE jobs ADD COLUMN gpus INTEGER")
         if "estimated_run_seconds" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN estimated_run_seconds REAL")
+        # `dedup_key`: what makes two requests "the same" (common/dedup.py); NULL when the
+        # job is never matched (incognito, Qwen3.8 without an Idempotency-Key, old jobs).
+        if "dedup_key" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN dedup_key TEXT")
+        # `attempts`: how many times the job has been given to a worker (1 = first try).
+        if "attempts" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1")
+        # `sha256` of an upload's content; NULL for uploads saved before it existed.
+        upload_columns = {row["name"] for row in conn.execute("PRAGMA table_info(uploads)")}
+        if "sha256" not in upload_columns:
+            conn.execute("ALTER TABLE uploads ADD COLUMN sha256 TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_dedup_key ON jobs(dedup_key)")
 
 
 # --- jobs --------------------------------------------------------------
@@ -113,13 +133,15 @@ def create_job(
     incognito: bool = False,
     gpus: int | None = None,
     estimated_run_seconds: float | None = None,
+    dedup_key: str | None = None,
 ) -> None:
     """`gpus` and `estimated_run_seconds` are what the backend decided at submit time, for
-    the backends that size their jobs (H3); None otherwise."""
+    the backends that size their jobs (H3); None otherwise. `dedup_key` is what a later
+    identical request is matched on (common/dedup.py); None for a job that is never matched."""
     with _connect() as conn:
         conn.execute(
             "INSERT INTO jobs (job_id, pipeline, status, job_dir, partition, request_json, created_at, incognito, "
-            "gpus, estimated_run_seconds) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)",
+            "gpus, estimated_run_seconds, dedup_key) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 job_id,
                 pipeline,
@@ -130,6 +152,7 @@ def create_job(
                 1 if incognito else 0,
                 gpus,
                 estimated_run_seconds,
+                dedup_key,
             ),
         )
 
@@ -166,6 +189,51 @@ def mark_failed(job_id: str, error: str) -> None:
             "WHERE job_id = ? AND status NOT IN ('succeeded', 'failed')",
             (error, _now(), job_id),
         )
+
+
+def requeue(job_id: str) -> bool:
+    """Put a job that was lost for reasons that are not its own fault (its worker or the model
+    server vanished) back to 'queued' for another try. False, and nothing changed, if the job is
+    already finished or has used up config.MAX_ATTEMPTS."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE jobs SET status = 'queued', slurm_job_id = NULL, started_at = NULL, attempts = attempts + 1 "
+            "WHERE job_id = ? AND status IN ('queued', 'running') AND attempts < ?",
+            (job_id, config.MAX_ATTEMPTS),
+        )
+        return cursor.rowcount == 1
+
+
+def statuses(job_ids: list[str]) -> dict[str, str]:
+    """job_id -> status for these jobs in as few queries as possible (a job id that is not in the
+    table is left out). Chunked so a long queue stays under SQLite's limit on query parameters."""
+    found: dict[str, str] = {}
+    with _connect() as conn:
+        for start in range(0, len(job_ids), 500):
+            chunk = job_ids[start : start + 500]
+            marks = ",".join("?" * len(chunk))
+            for row in conn.execute(f"SELECT job_id, status FROM jobs WHERE job_id IN ({marks})", chunk):
+                found[row["job_id"]] = row["status"]
+    return found
+
+
+def count_inflight_for(pipelines: tuple[str, ...]) -> int:
+    """Queued or running jobs of these pipelines -- backs each backend's own queue limit."""
+    marks = ",".join("?" * len(pipelines))
+    with _connect() as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS n FROM jobs WHERE status IN ('queued', 'running') AND pipeline IN ({marks})",
+            pipelines,
+        ).fetchone()
+        return int(row["n"])
+
+
+def find_by_dedup_key(dedup_key: str) -> list[sqlite3.Row]:
+    """Every job created with this dedup key, newest first."""
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT * FROM jobs WHERE dedup_key = ? ORDER BY created_at DESC", (dedup_key,)
+        ).fetchall()
 
 
 def get_job(job_id: str) -> sqlite3.Row | None:
@@ -274,15 +342,57 @@ def count_inflight_jobs() -> int:
         return int(row["n"])
 
 
+def inflight_counts_by_pipeline() -> dict[tuple[str, str], int]:
+    """(pipeline, status) -> number of queued or running jobs, in one query -- backs the GPU
+    capacity accounting of the backends that run one Slurm job per request (common/capacity.py)."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT pipeline, status, COUNT(*) AS n FROM jobs WHERE status IN ('queued', 'running') "
+            "GROUP BY pipeline, status"
+        ).fetchall()
+    return {(row["pipeline"], row["status"]): int(row["n"]) for row in rows}
+
+
+# --- settings ------------------------------------------------------------
+
+
+def get_setting(key: str) -> str | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+
+def set_setting(key: str, value: str) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+
+
 # --- uploads -------------------------------------------------------------
 
 
-def create_upload(asset_id: str, filename: str, path: Path, size_bytes: int) -> None:
+def create_upload(asset_id: str, filename: str, path: Path, size_bytes: int, sha256: str | None = None) -> None:
     with _connect() as conn:
         conn.execute(
-            "INSERT INTO uploads (asset_id, filename, path, size_bytes, created_at) VALUES (?, ?, ?, ?, ?)",
-            (asset_id, filename, str(path), size_bytes, _now()),
+            "INSERT INTO uploads (asset_id, filename, path, size_bytes, created_at, sha256) VALUES (?, ?, ?, ?, ?, ?)",
+            (asset_id, filename, str(path), size_bytes, _now(), sha256),
         )
+
+
+def upload_sha256s(asset_ids: list[str]) -> dict[str, str | None]:
+    """asset_id -> content sha256 (None for an upload saved before hashes were kept); an unknown
+    asset_id is left out."""
+    found: dict[str, str | None] = {}
+    with _connect() as conn:
+        for start in range(0, len(asset_ids), 500):
+            chunk = asset_ids[start : start + 500]
+            marks = ",".join("?" * len(chunk))
+            for row in conn.execute(f"SELECT asset_id, sha256 FROM uploads WHERE asset_id IN ({marks})", chunk):
+                found[row["asset_id"]] = row["sha256"]
+    return found
 
 
 def get_upload(asset_id: str) -> sqlite3.Row | None:

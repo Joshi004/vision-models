@@ -22,7 +22,7 @@ router = APIRouter()
 
 def _submit(dispatch_fn, req) -> JobSubmitResponse:
     try:
-        job_id = dispatch_fn(req)
+        submission = dispatch_fn(req)
     except dispatch.CapacityError as e:
         raise HTTPException(429, str(e)) from e
     except dispatch.InputError as e:
@@ -31,7 +31,7 @@ def _submit(dispatch_fn, req) -> JobSubmitResponse:
         raise HTTPException(400, f"Invalid asset reference: {e}") from e
     except dispatch.DispatchError as e:
         raise HTTPException(502, f"Could not submit Slurm job: {e}") from e
-    return JobSubmitResponse(job_id=job_id, status="queued")
+    return JobSubmitResponse(job_id=submission.job_id, status=submission.status, reused=submission.reused)
 
 
 @router.post(

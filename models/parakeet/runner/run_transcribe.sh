@@ -23,14 +23,9 @@
 set -euo pipefail
 
 SERVICE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SERVICE_DIR/../../.." && pwd)"  # <repo>/models/parakeet/runner/<this file>
-DATA_DIR="${VISION_DATA_DIR:-$REPO_ROOT/../vision-data}"
-VENV_PATH="$DATA_DIR/envs/parakeet"
-
-NVIDIA_LIB_PATH="$VENV_PATH/lib/python3.10/site-packages/nvidia"
-if [ -d "$NVIDIA_LIB_PATH" ]; then
-  export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:$NVIDIA_LIB_PATH/cublas/lib:$NVIDIA_LIB_PATH/cuda_cupti/lib:$NVIDIA_LIB_PATH/cuda_nvrtc/lib:$NVIDIA_LIB_PATH/cuda_runtime/lib:$NVIDIA_LIB_PATH/cudnn/lib:$NVIDIA_LIB_PATH/cufft/lib:$NVIDIA_LIB_PATH/curand/lib:$NVIDIA_LIB_PATH/cusolver/lib:$NVIDIA_LIB_PATH/cusparse/lib:$NVIDIA_LIB_PATH/nccl/lib:$NVIDIA_LIB_PATH/nvtx/lib:${LD_LIBRARY_PATH:-}"
-fi
+# Sets VENV_PATH and the LD_LIBRARY_PATH fix described above (shared with worker.sh).
+# shellcheck source=cuda_env.sh
+source "$SERVICE_DIR/cuda_env.sh"
 
 # exec, not a plain call: replaces this shell process with python entirely,
 # so python's own exit code is reported directly to Slurm/run_pipeline_job.py

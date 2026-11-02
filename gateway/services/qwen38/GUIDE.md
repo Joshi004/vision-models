@@ -24,8 +24,17 @@ H100) running and sends each request to it, so a request is answered in seconds 
   stopping the server.
 - Several requests run at the same time on the one server (up to 8).
   More wait in `queued`.
-- The gateway holds the waiting requests in memory. If the gateway restarts, requests that were still
-  waiting or running fail with a message saying so; submit them again.
+- The gateway holds the waiting requests in memory, together with the request stored with each job. If the
+  gateway restarts, requests that were waiting or running are started again under the same `job_id`
+  (`attempts` on `GET /v1/jobs/{job_id}` counts the starts, at most 3). The same happens if the model server is
+  stopped or pre-empted while it is answering. A request the model server refuses is not run again.
+- **Sending the same request again:** answers are not repeatable, so a request is never recognised by its
+  content. To make a resend safe, send an `Idempotency-Key` header (a key you choose, for example a UUID) with
+  the request. A second `POST` with the same key returns the first job's `job_id` with `reused: true`, as long as
+  that job is still queued or running, or succeeded and its answer is still available -- the request is not run
+  twice. A job that failed is not reused: sending the request again with the same key creates a new job. The same
+  key with a different request is refused with 422. The key is ignored when the request has `incognito: true`.
+  `DELETE /v1/jobs/{job_id}` cancels a shared job for everyone who was given it.
 
 ### Request
 

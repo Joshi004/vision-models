@@ -22,7 +22,7 @@ router = APIRouter()
 def _submit(submit, req) -> JobSubmitResponse:
     """Run one dispatch function and translate its errors to HTTP errors."""
     try:
-        job_id = submit(req)
+        submission = submit(req)
     except dispatch.CapacityError as e:
         raise HTTPException(429, str(e)) from e
     except dispatch.InputError as e:
@@ -31,7 +31,7 @@ def _submit(submit, req) -> JobSubmitResponse:
         raise HTTPException(400, f"Invalid asset reference: {e}") from e
     except dispatch.DispatchError as e:
         raise HTTPException(502, f"Could not submit Slurm job: {e}") from e
-    return JobSubmitResponse(job_id=job_id, status="queued")
+    return JobSubmitResponse(job_id=submission.job_id, status=submission.status, reused=submission.reused)
 
 
 @router.post(
