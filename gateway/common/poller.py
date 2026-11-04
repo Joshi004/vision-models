@@ -35,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from common import config, job_store, retention, worker_pool
+from services.h3 import oom_retry as h3_oom_retry
 from services.h3 import usage_log as h3_usage_log
 
 logger = logging.getLogger("model-api.poller")
@@ -148,6 +149,10 @@ def _check_one(row: sqlite3.Row) -> None:
         return
 
     if (job_dir / ".failed").exists():
+        # An H3 job that ran out of GPU memory on 4 GPUs is run again on 8 instead of being failed.
+        if row["pipeline"].startswith("h3:") and h3_oom_retry.retry_on_more_gpus(row):
+            _pending_since.pop(job_id, None)
+            return
         job_store.mark_failed(job_id, _read_error(job_dir))
         _record_usage(row)
         retention.on_job_failed(job_id)

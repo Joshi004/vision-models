@@ -45,7 +45,9 @@ that is valid but too big for its GPUs, with HTTP 422 and a sentence saying why,
 (Qwen-Image-2.1, MiniMax H3, the four music and audio backends, Parakeet and Breeze TTS) and the Qwen3.8 text model put a request back in
 the queue, under the same `job_id`, when the GPU job or model server running it is lost (for example
 pre-empted), up to 3 starts in total; `attempts` on a job's status says how many. A request that fails because of
-its own content is not run again. Those backends also recognise a request that is identical to an earlier one
+its own content is not run again, with one exception: a MiniMax H3 job given 4 GPUs that runs out of GPU memory in
+the text encoder or the denoising is run once more on 8 GPUs (same `job_id`, `gpus` becomes 8, `attempts` goes up by
+one). Those backends also recognise a request that is identical to an earlier one
 (same settings and seed, same uploaded file content) and answer with the earlier job's `job_id` and
 `reused: true` instead of running it again -- unless the earlier job failed, or the request has
 `incognito: true`. Qwen3.8 does this only for a request that carries the same `Idempotency-Key` header. A shared

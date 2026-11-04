@@ -226,6 +226,20 @@ def requeue(job_id: str) -> bool:
         return cursor.rowcount == 1
 
 
+def requeue_on_more_gpus(job_id: str, gpus: int, estimated_run_seconds: float) -> bool:
+    """Put a job that ran out of memory back to 'queued' to run again on `gpus` GPUs, which is more than it had
+    (so this works once per job). Clears the earlier attempt's error. False, and nothing changed, if the job is
+    not queued or running (finished, cancelled) or already has `gpus` GPUs or more."""
+    with _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE jobs SET status = 'queued', slurm_job_id = NULL, started_at = NULL, error = NULL, "
+            "attempts = attempts + 1, gpus = ?, estimated_run_seconds = ? "
+            "WHERE job_id = ? AND status IN ('queued', 'running') AND gpus < ?",
+            (gpus, estimated_run_seconds, job_id, gpus),
+        )
+        return cursor.rowcount == 1
+
+
 def statuses(job_ids: list[str]) -> dict[str, str]:
     """job_id -> status for these jobs in as few queries as possible (a job id that is not in the
     table is left out). Chunked so a long queue stays under SQLite's limit on query parameters."""

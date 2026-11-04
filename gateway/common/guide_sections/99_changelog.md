@@ -4,6 +4,11 @@ Dates are when a change shipped on this codebase, not necessarily when you're re
 `api_version` field (`GET /v1/guide?format=json`) is this server's own current version; compare it
 against what you last integrated against.
 
+- **0.26.0** (2026-11-03): **MiniMax H3 retries out-of-memory jobs on 8 GPUs.** An H3 job that was given 4 GPUs and ran
+  out of GPU memory in the text encoder or in the denoising is now run once more on 8 GPUs, under the same `job_id`
+  (it goes back to `queued`, `gpus` becomes 8, `estimated_run_seconds` is recomputed, `attempts` goes up by one). On an
+  8-GPU job the text encoder is now split over four GPUs instead of two. Any other failure, and an out-of-memory error
+  on 8 GPUs, still fails the job. No request or response field changed; set `H3_OOM_RETRY=0` to turn the retry off.
 - **0.25.0** (2026-11-03): **Why a job is queued, and real GPU usage.** A queued job's status and the jobs list gain
   `queue_state` (`scheduling`, `model_limit`, `gpu_limit`, `priority`, `slurm_pending` or `model_loading`; null unless
   the job is queued). `GET /v1/capacity` and `PUT /v1/capacity` gain, per model and in total, `gpus_allocated` and

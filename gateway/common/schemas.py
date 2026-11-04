@@ -565,7 +565,8 @@ class JobStatusResponse(BaseModel):
             "How many times this job has been started. It is above 1 when the model worker (or model "
             "server) running it was lost, for example pre-empted, and the job was put in the queue again "
             "under the same job_id. A job that fails because of its own request (a model error) is not "
-            "run again."
+            "run again, except that a MiniMax H3 job that ran out of GPU memory on 4 GPUs is run once "
+            "more on 8 (then 'gpus' is 8 and this number is one higher)."
         ),
         examples=[1],
     )

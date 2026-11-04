@@ -83,7 +83,8 @@ MAX_REFERENCES = 12
 # Slurm allocation shape. Every job holds N GPUs on one node (N = 4 or 8, chosen
 # per request by services/h3/sizing.py) and always runs "ulysses":
 #   * While the prompt and references are encoded, the Qwen3-VL-32B encoder
-#     (62 GiB of bf16 weights) is split across two GPUs (layers 0-31 and 32-63),
+#     (62 GiB of bf16 weights) is split across two GPUs (layers 0-31 and 32-63) on a
+#     4-GPU job, and across four GPUs (16 layers each, g1 .. g4) on an 8-GPU job,
 #     and the 33B transformer (61.7 GiB) sits on the first GPU.
 #   * Then ALL N GPUs denoise together: the transformer is copied to every GPU
 #     (61.7 GiB each) and each GPU computes every step on 1/N of the token
@@ -142,6 +143,11 @@ PARALLELISM = "ulysses"
 GPU_OPTIONS = tuple(sorted({int(n) for n in os.environ.get("H3_GPU_OPTIONS", "4,8").split(",")}))
 if not GPU_OPTIONS or any(n not in (4, 8) for n in GPU_OPTIONS):
     raise RuntimeError(f"H3_GPU_OPTIONS must list 4 and/or 8, got {GPU_OPTIONS}.")
+
+# A 4-GPU job that runs out of memory in the encoder or in the denoising is run once more on 8 GPUs
+# (services/h3/oom_retry.py; the encoder then gets four GPUs instead of two). H3_OOM_RETRY=0 turns that off.
+# Has no effect unless 8 is one of GPU_OPTIONS.
+OOM_RETRY = os.environ.get("H3_OOM_RETRY", "1") != "0" and 8 in GPU_OPTIONS
 
 # Largest share of the denoising sequence one GPU may hold (rows of the packed
 # sequence: text + references + audio + video). Activations are about 0.18 MiB per

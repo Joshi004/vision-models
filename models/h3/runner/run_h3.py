@@ -19,9 +19,10 @@ them, splitting the pipeline the way diffusers' own MiniMax-H3 documentation doe
 
   * the conditioning half -- media preparation plus the Qwen3-VL-32B text/vision
     encoder (62 GiB of bf16 weights) -- runs in a CHILD process on g1 and g2 (with
-    2 GPUs only g1): from N = 4 up the encoder's 64 decoder layers are split between
-    two GPUs (layers 0-31 on g1, 32-63 on g2, see `split_text_encoder`), which leaves
-    room for the tokens of many large reference images;
+    2 GPUs only g1; with 8 GPUs on g1 .. g4): from N = 4 up the encoder's 64 decoder layers
+    are split between two GPUs (layers 0-31 on g1, 32-63 on g2), with N = 8 between four
+    (16 layers each on g1 .. g4), see `split_text_encoder`. That leaves room for the tokens
+    of many large reference images;
   * the generation half -- reference/keyframe VAE encoding, the 33B transformer
     (61.7 GiB), and the video/audio decode -- runs in THIS process on g0 (rank 0).
 
@@ -151,9 +152,8 @@ DEFAULT_PARALLELISM = "ulysses"
 # split across two GPUs. Ulysses needs a degree that divides the transformer's 56 attention heads: 2, 4 and 8 all do.
 GPU_OPTIONS = (2, 4, 8)
 DEFAULT_GPUS = 2
-# The encoder (Qwen3-VL-32B) has 64 decoder layers; when it has two GPUs, layers [0, SPLIT) go to the first, the rest
-# (and the final norm) to the second.
-TEXT_ENCODER_SPLIT_AT = 32
+# The encoder (Qwen3-VL-32B) has 64 decoder layers; when it has several GPUs they are divided evenly between them
+# (see `split_text_encoder`): 32 + 32 on two GPUs, 16 each on four.
 
 # --parallelism ulysses: ranks 1 .. gpus-1 ("denoise workers", one extra process each) run the same denoising loop as
 # this process (rank 0, on g0), each on cuda:<rank> = the job's GPU number <rank>.
@@ -449,7 +449,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=GPU_OPTIONS,
         default=DEFAULT_GPUS,
         help="How many of the job's GPUs to use (the Slurm job must hold at least that many). With 4 or more, the text "
-        "encoder is split across two GPUs; every GPU takes part in the denoising (ulysses).",
+        "encoder is split across two GPUs (four with 8); every GPU takes part in the denoising (ulysses).",
     )
     p.add_argument(
         "--parallelism",
@@ -521,8 +521,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def pick_gpus(gpus: int) -> list[str]:
     """The first `gpus` GPUs as they are named in CUDA_VISIBLE_DEVICES, which Slurm sets to the job's own GPUs.
-    Without it, the first `gpus` on the node. g0 is the generation GPU (rank 0); g1 (and g2 when the encoder has two
-    GPUs) run the encoder first and become denoising ranks 1 (and 2) afterwards."""
+    Without it, the first `gpus` on the node. g0 is the generation GPU (rank 0); g1 (and g2 .. g4 when the encoder has
+    more GPUs) run the encoder first and become denoising ranks 1 (and 2 .. 4) afterwards."""
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
     ids = [item.strip() for item in visible.split(",") if item.strip()] if visible else [str(i) for i in range(gpus)]
     if len(ids) < gpus:
@@ -534,8 +534,10 @@ def pick_gpus(gpus: int) -> list[str]:
 
 
 def encoder_gpu_count(gpus: int) -> int:
-    """GPUs the text/vision encoder gets: two from 4 GPUs up (62 GiB of weights plus activations that grow with the
-    tokens of the reference images), else one."""
+    """GPUs the text/vision encoder gets: four on an 8-GPU job, two on a 4-GPU job (62 GiB of weights plus
+    activations that grow with the tokens of the reference images), else one."""
+    if gpus >= 8:
+        return 4
     return 2 if gpus >= 4 else 1
 
 
@@ -874,48 +876,56 @@ def record_conditioning_numbers(metrics: Metrics, values: dict) -> None:
         pass
 
 
-def split_text_encoder(
-    text_encoder, split_at: int = TEXT_ENCODER_SPLIT_AT, first_device: str = "cuda:0", second_device: str = "cuda:1"
-) -> int:
-    """Place the Qwen3-VL text/vision encoder on two GPUs: the vision tower, the token embeddings and decoder layers
-    [0, split_at) on `first_device`, decoder layers [split_at, 64) and the final norm on `second_device`. Returns the
-    number of layers on the second GPU.
+def split_text_encoder(text_encoder, devices: list[str]) -> list[tuple[int, int]]:
+    """Place the Qwen3-VL text/vision encoder on several GPUs (`devices`, two or four): the vision tower, the token
+    embeddings and the first share of the decoder layers on the first device, the following shares on the next
+    devices, and the final norm on the last one. The 64 layers are divided evenly (32 + 32 on two GPUs, 16 each on
+    four). Returns each device's layers as (first layer, last layer) pairs.
 
     Why: the encoder reads the request's prompt and every reference image as one sequence (a 2048 px short edge makes
     4,000-8,000 tokens per image), and it keeps the output of every one of its 64 layers (about 0.63 MiB per token)
-    on top of its 62 GiB of weights, so on one 80 GB GPU two portrait images already ran it out of memory. Two GPUs
-    hold half the weights and half the per-layer outputs each.
+    on top of its 62 GiB of weights, so on one 80 GB GPU two portrait images already ran it out of memory. Several GPUs
+    hold an equal part of the weights and of the per-layer outputs each.
 
     The model's top-level `device` (what the offload manager compares with its execution device, see
-    `get_qwen3vl_prompt_embeds`) is that of its first parameter, the vision tower on `first_device`, so the manager
+    `get_qwen3vl_prompt_embeds`) is that of its first parameter, the vision tower on the first device, so the manager
     does not try to move the encoder back onto one GPU. Placed by hand, like `split_transformer`: the layers still run
-    one after another and the result is the same; a forward pre-hook on each layer from `split_at` on carries its
-    arguments (the hidden states, the rotary tables, the attention mask) over to `second_device`. The embedding and the
-    `lm_head` (which this pipeline never calls) are not on the second GPU; the head stays in host memory."""
+    one after another and the result is the same; a forward pre-hook on each layer that is not on the first device
+    carries its arguments (the hidden states, the rotary tables, the attention mask) over to that layer's device. The
+    embedding and the `lm_head` (which this pipeline never calls) are only on the first GPU / not on a GPU at all; the
+    head stays in host memory."""
     from accelerate.utils import send_to_device
 
     language_model = text_encoder.model.language_model
     layers = language_model.layers
-    if not 0 < split_at < len(layers):
-        raise ValueError(f"Cannot split the text encoder's {len(layers)} layers at {split_at}.")
+    if not 2 <= len(devices) <= len(layers):
+        raise ValueError(f"Cannot split the text encoder's {len(layers)} layers over {len(devices)} devices.")
+    first_device, last_device = devices[0], devices[-1]
+    layers_per_device = -(-len(layers) // len(devices))  # rounded up, so the last device may get fewer
 
     text_encoder.model.visual.to(first_device)
     language_model.embed_tokens.to(first_device)
     language_model.rotary_emb.to(first_device)
-    for layer in layers[:split_at]:
-        layer.to(first_device)
-    for layer in layers[split_at:]:
-        layer.to(second_device)
-    language_model.norm.to(second_device)
+    language_model.norm.to(last_device)
 
-    def move_inputs(module, args, kwargs):
-        return send_to_device(args, second_device), send_to_device(kwargs, second_device)
+    def make_move_inputs(device: str):
+        def move_inputs(module, args, kwargs):
+            return send_to_device(args, device), send_to_device(kwargs, device)
 
-    # On every layer of the second GPU, not just the first: the language model's loop hands each layer the rotary
-    # tables and the attention mask from the first GPU again (only the hidden states chain from layer to layer), so
-    # each of these layers has to bring them over itself. (Already-moved tensors are returned as they are.)
-    for layer in layers[split_at:]:
-        layer.register_forward_pre_hook(move_inputs, with_kwargs=True)
+        return move_inputs
+
+    # On every layer of the later devices, not just the first of each: the language model's loop hands each layer the
+    # rotary tables and the attention mask from the first GPU again (only the hidden states chain from layer to
+    # layer), so each of these layers has to bring them over itself. (Already-moved tensors are returned as they are.)
+    ranges: list[tuple[int, int]] = []
+    for index, device in enumerate(devices):
+        start = index * layers_per_device
+        stop = min(start + layers_per_device, len(layers))
+        ranges.append((start, stop - 1))
+        for layer in layers[start:stop]:
+            layer.to(device)
+            if device != first_device:
+                layer.register_forward_pre_hook(make_move_inputs(device), with_kwargs=True)
 
     # Everything the forward pass touches must be on a GPU now, and the model must report the first one, or the
     # offload manager would move the whole encoder onto it (and run it out of memory) when the encoder is first used.
@@ -924,7 +934,7 @@ def split_text_encoder(
         raise RuntimeError(f"The text encoder was not fully placed on the GPUs; still on the CPU: {not_placed[:3]}")
     if str(text_encoder.device) != first_device:
         raise RuntimeError(f"The text encoder reports device {text_encoder.device}, expected {first_device}.")
-    return len(layers) - split_at
+    return ranges
 
 
 def run_condition_stage(args: argparse.Namespace, metrics: Metrics) -> int:
@@ -939,16 +949,16 @@ def run_condition_stage(args: argparse.Namespace, metrics: Metrics) -> int:
         log("condition", "loading the text/vision encoder")
         pipeline, seconds = make_pipeline(blocks, args.model_dir, "cuda:0")
         metrics.timing("setup", seconds)
-        gpus = torch.cuda.device_count()  # the GPUs the parent gave this child: one, or two for a 4+ GPU job
+        gpus = torch.cuda.device_count()  # the GPUs the parent gave this child: one, two (4-GPU job) or four (8-GPU job)
         metrics.update(encoder_gpus=gpus, gpu_total_gib=round(torch.cuda.get_device_properties(0).total_memory / 2**30, 1))
         if gpus >= 2:
-            # Reads the weights from disk onto the two GPUs now (this is the slow part), instead of on first use.
+            # Reads the weights from disk onto the GPUs now (this is the slow part), instead of on first use.
             with metrics.stage("load_encoder"):
-                moved = split_text_encoder(pipeline.text_encoder)
+                layer_ranges = split_text_encoder(pipeline.text_encoder, [f"cuda:{index}" for index in range(gpus)])
+            placement = " / ".join(f"{first}-{last}" for first, last in layer_ranges)
             log(
                 "condition",
-                f"set up in {seconds:.0f}s; text encoder split across 2 GPUs (layers 0-{TEXT_ENCODER_SPLIT_AT - 1} / "
-                f"{TEXT_ENCODER_SPLIT_AT}-{TEXT_ENCODER_SPLIT_AT + moved - 1}) and loaded in "
+                f"set up in {seconds:.0f}s; text encoder split across {gpus} GPUs (layers {placement}) and loaded in "
                 f"{metrics.data['timings_s']['load_encoder']:.0f}s",
             )
         else:
@@ -1121,7 +1131,7 @@ def init_distributed(rank: int, port: int, world_size: int):
         is_master=rank == 0,
         timeout=RENDEZVOUS_TIMEOUT if rank == 0 else CONNECT_TIMEOUT,
     )
-    # Only now touch the GPU: for ranks 1 and 2 (the encoder's GPUs) this point is reached after rank 0 has seen the
+    # Only now touch the GPU: for the ranks that are the encoder's GPUs (1 and 2, or 1 .. 4) this point is reached after rank 0 has seen the
     # encoder exit.
     device = torch.device(f"cuda:{rank}")
     torch.cuda.set_device(device)
@@ -1277,7 +1287,7 @@ def run_pipeline_ulysses(args: argparse.Namespace, metrics: Metrics) -> int:
     port = free_local_port()
     child = spawn_condition_child(handoff, encoder_gpus)
     # Started now, so their imports are done long before they are needed. They see all the job's GPUs but touch none
-    # until rank 0 opens the rendezvous store, which is after the encoder (the current user of GPUs g1 and g2) has
+    # until rank 0 opens the rendezvous store, which is after the encoder (the current user of GPUs g1 and g2, or g1 .. g4 on 8 GPUs) has
     # exited. Rank r takes the job's GPU number r (cuda:r).
     workers = [
         subprocess.Popen(
@@ -1432,7 +1442,7 @@ def run_denoise_worker_stage(args: argparse.Namespace, metrics: Metrics) -> int:
         # Only the two schedulers: the transformer is not read from disk here, rank 0 sends it.
         scheduler_names = [spec.name for spec in denoise_blocks.expected_components if spec.name != denoiser_name]
         pipeline.load_components(names=scheduler_names, dtype=torch.bfloat16)
-        log(f"denoise-worker {rank}", "ready, waiting for the generation process (GPUs 1 and 2 are the encoder's until then)")
+        log(f"denoise-worker {rank}", "ready, waiting for the generation process (the first GPUs after g0 are the encoder's until then)")
 
         with metrics.stage("wait_for_rank0"):  # until the weights are loaded and the encoder has exited
             store = init_distributed(rank, port, world_size)

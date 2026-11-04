@@ -86,11 +86,12 @@ in `CUDA_VISIBLE_DEVICES` order `g0, g1, g2, ...`:
 
 - **g0 (rank 0):** loads the transformer and the VAEs, VAE-encodes the references, broadcasts the transformer to the others,
   denoises its share, and decodes the result.
-- **g1 and g2:** hold the **text/vision encoder** while the prompt and references are read: Qwen3-VL's 64 decoder layers are
-  split between them (layers 0-31 on g1, 32-63 on g2), so the encoder's per-layer outputs for a long sequence of reference-image
-  tokens have two cards to live on. When the encoder has finished and exited they become ranks 1 and 2.
-- **g3 and up (8-GPU jobs have g3 .. g7):** idle until rank 0 is ready, then ranks 3 and up. They only receive the weights and
-  denoise.
+- **g1 and g2 (4-GPU job), g1 .. g4 (8-GPU job):** hold the **text/vision encoder** while the prompt and references are read:
+  Qwen3-VL's 64 decoder layers are split evenly between them (layers 0-31 on g1, 32-63 on g2 with two GPUs; 16 layers each on
+  g1 .. g4 with four), so the encoder's per-layer outputs for a long sequence of reference-image tokens have more cards to live
+  on. When the encoder has finished and exited they become ranks 1 and 2 (and 3 and 4).
+- **The other GPUs (an 8-GPU job has g5 .. g7 besides; a 4-GPU job has g3):** idle until rank 0 is ready, then ranks 3 (or 5) and
+  up. They only receive the weights and denoise.
 - **Denoising uses every GPU** (`ulysses_degree=N`): each holds the whole transformer (61.7 GiB) and runs 1/N of the packed
   token sequence through every block. 56 attention heads divide evenly by 4 and by 8. A 2-GPU layout (`--gpus 2`, the encoder on one
   GPU) and the `split` mode (transformer blocks divided between two GPUs) are still in the runner as operator fallbacks, but the
@@ -98,8 +99,8 @@ in `CUDA_VISIBLE_DEVICES` order `g0, g1, g2, ...`:
 
 ```
 Slurm job (N GPUs)  ->  run_h3.py (rank 0, g0: generation)
-                          |-- spawns child run_h3.py --stage condition (g1 + g2: encoder split over two GPUs)
-                          |      before_encode -> text_encoder           loads ~62 GiB encoder, layers 0-31 | 32-63
+                          |-- spawns child run_h3.py --stage condition (g1 + g2, or g1 .. g4 on 8 GPUs: encoder split evenly)
+                          |      before_encode -> text_encoder           loads ~62 GiB encoder, layers 0-31 | 32-63 (4 GPUs: 16 each)
                           |      writes work/h3_conditioning.pt, exits
                           |-- spawns N-1 run_h3.py --stage denoise-worker --rank r (r = 1 .. N-1, will take g<r>)
                           |      each imports, then waits for rank 0 to open a localhost rendezvous store
@@ -117,10 +118,11 @@ Slurm job (N GPUs)  ->  run_h3.py (rank 0, g0: generation)
   CPU): the text embedding and its row tags, plus the resolved `height`/`width`, `num_frames`, `keyframes` or
   `normalized_references`. They cross as one pickle file in the job's own folder, which the runner deletes when it ends.
 - **Separate processes, not threads**, so the weights are read from disk in parallel: accelerate's weight-loading context patches
-  torch globally, which is not safe across threads. The child sees only the encoder's GPUs (as its `cuda:0` and `cuda:1`); the
+  torch globally, which is not safe across threads. The child sees only the encoder's GPUs (as its `cuda:0` and `cuda:1`, and up to `cuda:3` on 8 GPUs); the
   parent sees all N: g0 as `cuda:0`, and it only touches the others after the child has exited.
-- **The encoder is placed by hand** (`split_text_encoder`): the vision tower, token embeddings, rotary embedding and layers 0-31
-  go to `cuda:0`, layers 32-63 and the final norm to `cuda:1`, and a forward pre-hook on layer 32 moves the hidden states and
+- **The encoder is placed by hand** (`split_text_encoder`): the vision tower, token embeddings, rotary embedding and the first
+  share of the layers (0-31 with two GPUs, 0-15 with four) go to `cuda:0`, the next shares to `cuda:1` (and `cuda:2`, `cuda:3`),
+  the final norm to the last one, and a forward pre-hook on every layer that is not on `cuda:0` moves the hidden states and
   position embeddings across. The first parameter of the whole encoder stays on `cuda:0`, which is the device the offload manager
   (`ComponentsManager.enable_auto_cpu_offload`) looks at, so it does not move the layers back.
 - Loading is lazy: `load_components` memory-maps the weights in seconds, and they are only read from disk when a model first
@@ -241,6 +243,27 @@ $VISION_DATA_DIR/envs/gateway/bin/python scripts/h3_usage_log.py backfill --dry-
 $VISION_DATA_DIR/envs/gateway/bin/python scripts/h3_usage_log.py csv --output h3_jobs.csv
 ```
 
+#### The retry on 8 GPUs after an out-of-memory error
+
+A job sized for **4 GPUs** that runs out of GPU memory in the **encoder** (`metrics.condition.failed_stage == "encode"`) or in the
+**denoising** (`failed_stage == "denoise"` in a `metrics.worker<r>.json`, or in `metrics.run.json` when the failure was rank 0's own) is
+run **once more on 8 GPUs** (`gateway/services/h3/oom_retry.py`, called by the poller when it finds the job's `.failed` marker). Other
+out-of-memory errors (reference encoding, decode, the weight copy: they run on g0 alone) and failures on 8 GPUs are not retried.
+`H3_OOM_RETRY=0` turns it off. It works like this:
+
+- `jobs.db`: the row goes back to `queued` with `gpus = 8`, the 8-GPU `estimated_run_seconds` and `attempts + 1`. The pool queues the
+  request first in line for a `...:8gpu` worker (which it starts if none is free; that worker loads the weights from scratch).
+- The first attempt's `run.log`, `error.txt`, `metrics.*.json` and `sizing.json` are moved into **`attempt-4gpu/`** in the job folder
+  (the second run overwrites them); `args.json` gets `--gpus 8` and `sizing.json` the 8-GPU sizing plus `retried_after_oom`.
+- The usage log gets **two lines for the job**. The first, for the 4-GPU attempt, has `outcome: "oom_retry"` and
+  `oom_retry: {role, stage, from_gpus, to_gpus}` next to its sizing and metrics (`sizing.encoder_tokens`, `sizing.rows_per_gpu`,
+  `metrics.condition.encoder_gpus` 2, `metrics.condition.oom.*` or `metrics.worker<r>.oom.*`). The second is the usual line for the
+  8-GPU run (`sizing.retried_after_oom`, `metrics.condition.encoder_gpus` 4, `metrics.condition.peak_gib.encoder` per encoder GPU, the
+  encoder's real `encoder_tokens`, the denoising peaks). Pairing them shows, per request, how many encoder tokens or rows per GPU
+  failed on 4 and whether 8 fixed it: the data for deciding later which requests to send straight to 8 GPUs.
+- If the retry cannot be queued, the job fails with its original error, as it would have without a retry.
+- Untested on the cluster: the first real 8-GPU run is also the first run of the four-GPU encoder split.
+
 The thresholds and speed-ups above are meant to be refitted from this data once 4- and 8-GPU jobs have run: compare `sizing.denoise_rows`
 with `metrics.run.sequence_rows` and `sizing.encoder_tokens` with `metrics.condition.encoder_tokens` (the formulas), the peak memory per
 GPU with the limits, and `sizing.estimated_run_seconds` with `run_s` (the time model).
@@ -325,7 +348,9 @@ reference images, and one reference video.
   requests above `H3_ROWS_PER_GPU` rows per GPU, but that limit is a guess: if a job still runs out of memory, read `metrics.run.peak_gib`
   and `metrics.run.oom`, lower `H3_ROWS_PER_GPU`, and compare the failed job's `sequence_rows` with the estimate.
 - **The encoder:** it keeps about 0.63 MiB per token on top of its half of the weights; `H3_MAX_ENCODER_TOKENS` (60,000) is a guess at
-  where two GPUs run out. The conditioning stage's `metrics.condition.peak_gib` and `failed_stage` say how close a job came.
+  where two GPUs run out (a job with about 52,000 tokens already ran out of memory on two). The conditioning stage's
+  `metrics.condition.peak_gib` and `failed_stage` say how close a job came. Such a job is run again on 8 GPUs (next section), where
+  the encoder has four.
 - **The VAE encode step** of the references runs on g0 next to the whole transformer (about 72 GiB), and reference videos make it
   heavier; the estimate's time per picture row for it (`REFERENCE_ENCODE_SECONDS_PER_ROW` in `config.py`) is a placeholder.
 - **Host RAM:** both halves hold their weights in RAM while loading. If a job is killed for memory, raise `H3_MEM` (256G by default for

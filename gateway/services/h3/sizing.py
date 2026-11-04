@@ -341,6 +341,24 @@ def _size(
     raise SizingError(last_problem)
 
 
+def for_gpus(sizing: dict, gpus: int) -> dict:
+    """A saved sizing.json (as a dict) redone for a job that runs on `gpus` GPUs instead: the per-GPU rows, the time
+    estimate and the Slurm time limit change; the request's own numbers (tokens, rows, canvas, references) do not.
+    Used when a 4-GPU job is run again on 8 after running out of memory (services/h3/oom_retry.py)."""
+    rows = int(sizing["denoise_rows"])
+    condition_rows = sum(int(reference.get("condition_rows") or 0) for reference in sizing.get("references", []))
+    parts = _estimate_parts(gpus, rows, condition_rows, int(sizing["steps"]))
+    estimate = sum(parts.values())
+    return {
+        **sizing,
+        "gpus": gpus,
+        "rows_per_gpu": math.ceil(rows / gpus),
+        "estimated_run_seconds": round(estimate, 1),
+        "time_limit_seconds": _time_limit_seconds(estimate),
+        "estimate_parts_seconds": parts,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Entry points, one per endpoint. Called by dispatch.py before anything is created.
 # ---------------------------------------------------------------------------

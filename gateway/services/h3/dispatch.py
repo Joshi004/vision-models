@@ -168,7 +168,17 @@ def _worker_key(module_args: list[str], gpus: int) -> str:
     cache holds it) and the same number of GPUs."""
     workflow = module_args[module_args.index("--workflow") + 1]
     checkpoint = "transformer_ref" if workflow == "ref2va" else "transformer"
+    return _key_for(checkpoint, gpus)
+
+
+def _key_for(checkpoint: str, gpus: int) -> str:
     return f"{checkpoint}:{gpus}gpu"
+
+
+def worker_key_with_gpus(key: str, gpus: int) -> str:
+    """`key` (as _worker_key made it) for a worker with `gpus` GPUs instead: the same checkpoint."""
+    checkpoint = key.rsplit(":", 1)[0]
+    return _key_for(checkpoint, gpus)
 
 
 def _worker_sbatch_command(worker_id: str, worker_dir: Path, key: str, partition: str, gpus: int) -> list[str]:

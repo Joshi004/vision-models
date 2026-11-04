@@ -16,7 +16,8 @@ scripts/h3_usage_log.py adds records of older jobs (`backfill`) and flattens the
 into a spreadsheet (`csv`).
 
 A record has:
-  job header   job_id (null if incognito), slurm_job_id, pipeline, outcome, incognito, partition,
+  job header   job_id (null if incognito), slurm_job_id, pipeline, outcome ("oom_retry" for the 4-GPU attempt of a job
+               that was run again on 8 GPUs, see oom_retry.py; the job's own final line follows later), incognito, partition,
                gpus, estimated_run_seconds, created_at/started_at/finished_at, queue_wait_s, run_s
   sizing       sizing.json as written at submission (absent for jobs from before it existed)
   metrics      {"run": ..., "condition": ..., "worker1": ...}: the runner's files (absent for older jobs)
@@ -348,6 +349,8 @@ def logged_job_keys() -> set[str]:
                     entry = json.loads(line)
                 except ValueError:
                     continue
+                if entry.get("outcome") == "oom_retry":
+                    continue  # the first attempt of a job that was run again: the job is not finished yet
                 key = _record_key(entry.get("slurm_job_id"), entry.get("worker_id"), entry.get("job_id"))
                 if key:
                     keys.add(key)

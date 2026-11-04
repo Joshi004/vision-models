@@ -363,11 +363,7 @@ class WorkerPool:
     def enqueue(self, request: PoolRequest, job_dir: Path) -> None:
         """Queue a request whose job row and job folder already exist. Raises PoolError if no worker
         can be started for it (the request is then not queued)."""
-        if request.limit_seconds + TIME_MARGIN_SECONDS > self.worker_time_seconds:
-            raise PoolError(
-                f"The worker time limit ({self.worker_time_seconds} s) is shorter than this request's "
-                f"limit ({request.limit_seconds} s); raise the worker time setting."
-            )
+        self._check_limit(request)
         _write_json_atomic(job_dir / _REQUEST_FILE, request.to_json())
         with self._lock:
             # The worker files only (no squeue call): a worker that finished a request a moment ago
@@ -375,6 +371,33 @@ class WorkerPool:
             self._refresh(check_slurm=False)
             self._queue.append(request)
             failures = self._schedule()
+        self._fail_unserved(request, failures)
+
+    def requeue_on_more_gpus(self, request: PoolRequest, job_dir: Path) -> None:
+        """Queue a request again, ahead of the others, with a request (a new key and GPU count) for a bigger
+        worker: its first run, on a smaller one, ran out of memory. The job row and folder are already updated.
+        The worker that ran it first is on its way out (a failed request ends its worker); it must not keep
+        the job, or its time limit would be held against the new run. Raises PoolError like `enqueue`."""
+        self._check_limit(request)
+        _write_json_atomic(job_dir / _REQUEST_FILE, request.to_json())
+        with self._lock:
+            for worker in self._workers.values():
+                if worker.current_job == request.job_id:
+                    worker.current_job = None
+            self._refresh(check_slurm=False)
+            self._queue.insert(0, request)
+            failures = self._schedule()
+        self._fail_unserved(request, failures)
+
+    def _check_limit(self, request: PoolRequest) -> None:
+        if request.limit_seconds + TIME_MARGIN_SECONDS > self.worker_time_seconds:
+            raise PoolError(
+                f"The worker time limit ({self.worker_time_seconds} s) is shorter than this request's "
+                f"limit ({request.limit_seconds} s); raise the worker time setting."
+            )
+
+    def _fail_unserved(self, request: PoolRequest, failures: list[tuple[PoolRequest, str]]) -> None:
+        """Fails the other requests a scheduling pass could not serve; raises PoolError for `request` itself."""
         own = None
         for failed_request, message in failures:
             if failed_request.job_id == request.job_id:

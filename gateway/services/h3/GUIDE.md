@@ -217,10 +217,14 @@ faster per step than 1344x768).
 **GPU memory.** On the earlier two-GPU layout, a 345-frame (14.4 s) clip at the full 1344x768 canvas ran out of memory
 with the whole transformer on one card, and a 10 s request with two large reference images ran the **text encoder** out
 of memory (it keeps every layer's output, about 0.63 MiB per token). The 4- and 8-GPU layout is meant to fix both -- the
-encoder is split over two GPUs and the denoising sequence over all of them -- but **it has not been run on this cluster
-yet, and the limits above are guesses**, so a request near them may still run out of memory. If a job fails with an
-out-of-memory error, retry with a smaller canvas (for example `height` 544, `width` 960), a shorter `duration_seconds`,
-or fewer or smaller references.
+encoder is split over two GPUs (four on an 8-GPU job) and the denoising sequence over all of them -- but **it has not
+been run on this cluster yet, and the limits above are guesses**, so a request near them may still run out of memory.
+If a job that was given 4 GPUs runs out of memory in the text encoder or in the denoising, the server runs it **once
+more on 8 GPUs** by itself, under the same `job_id`: the job goes back to `queued`, `gpus` becomes 8, `estimated_run_seconds`
+is worked out again, and `attempts` goes up by one. That second run starts with a worker that has to load the weights
+(about 5 to 6 minutes) and may wait for 8 free GPUs, so such a request takes noticeably longer. Running out of memory
+in any other stage, or on 8 GPUs, still fails the job. If a job fails with an out-of-memory error, retry with a smaller
+canvas (for example `height` 544, `width` 960), a shorter `duration_seconds`, or fewer or smaller references.
 
 ### 7. Licence and responsible use
 
@@ -239,5 +243,6 @@ sending its request again creates a new job. A request with `incognito: true` is
 `DELETE /v1/jobs/{job_id}` cancels it for everyone who was given it. If the GPU job running your request is lost (for
 example pre-empted), the request goes back in the queue under the same `job_id` -- `attempts` on
 `GET /v1/jobs/{job_id}` shows how many times it was started, at most 3 -- while a job that fails because of its own
-request (a model error) is not run again. So a client can fire its requests, and send them again after a timeout or a
+request (a model error) is not run again, except for the one 8-GPU retry after an out-of-memory error described under
+"GPU memory". So a client can fire its requests, and send them again after a timeout or a
 crash, without checking first whether they are already queued.
